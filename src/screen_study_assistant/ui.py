@@ -139,7 +139,13 @@ QWidget#settings QKeySequenceEdit, QWidget#settings QComboBox {
     border-radius: 12px;
 }
 QWidget#settings QKeySequenceEdit QLineEdit,
-QWidget#settings QKeySequenceEdit QLineEdit:focus { background: transparent; border: none; }
+QWidget#settings QKeySequenceEdit QLineEdit:focus {
+    background: transparent; border: none; padding: 5px 8px; color: #38516F;
+}
+QWidget#settings QKeySequenceEdit#shortcut_input {
+    background: rgba(187,206,235,210); border: 1px solid rgba(90,120,165,160);
+    border-radius: 12px; padding: 4px;
+}
 QWidget#settings QScrollBar::handle:vertical { background: rgba(97,112,138,75); }
 """
 
@@ -200,6 +206,11 @@ class ShortcutEdit(QKeySequenceEdit):
 
     def __init__(self, sequence):
         super().__init__(sequence)
+        self.setObjectName("shortcut_input")
+        # This compound editor has no background paint of its own on macOS.
+        # Ask Qt to paint its styled container as well as the inner text field.
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setMinimumHeight(42)
         self.installEventFilter(self)
         self.findChild(QLineEdit).installEventFilter(self)
 
