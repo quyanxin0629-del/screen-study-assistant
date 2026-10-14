@@ -1,0 +1,36 @@
+# Python / development
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+config.local.*
+secrets.*
+*.pem
+*.key
+
+# User notes and runtime data; keep outside the repository where possible
+notes/
+data/
+logs/
+*.log
+*.sqlite*
+screenshots/
+*.spec
+work/
+node_modules/

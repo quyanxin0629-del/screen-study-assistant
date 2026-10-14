@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "screen-study-assistant"
+version = "0.1.0"
+description = "Screen learning assistant with local Markdown notes and concept cards"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6-Essentials>=6.8,<7",
+    "httpx>=0.27,<1",
+    "keyring>=25,<26",
+    "PyYAML>=6,<7",
+    "pyobjc-framework-Vision>=10; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10; sys_platform == 'darwin'",
+    "pynput>=1.7,<2; sys_platform == 'linux'",
+]
+
+[project.optional-dependencies]
+ocr = [
+    "rapidocr==3.10.0",
+    "onnxruntime-directml>=1.20,<2; sys_platform == 'win32'",
+    "onnxruntime>=1.20,<2; sys_platform != 'win32'",
+]
+dev = ["pytest>=8,<9", "ruff>=0.9"]
+build = ["pyinstaller>=6.12,<7"]
+
+[project.scripts]
+screen-study-assistant = "screen_study_assistant.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+screen_study_assistant = ["assets/math/*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
