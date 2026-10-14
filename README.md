@@ -18,6 +18,14 @@ chmod +x start.command scripts/build_macos.sh
 python -m screen_study_assistant
 ```
 
+### macOS 更新与录屏授权
+
+开发版默认使用临时（ad-hoc）签名。macOS 将其身份绑定到具体版本的代码哈希；重新打包后，即使“录屏与系统录音”的开关仍显示开启，旧授权也可能不适用于新版。固定应用名或 Bundle ID 不能解决这个问题。
+
+`scripts/build_macos.sh` 已阻止无签名证书时静默覆盖现有应用。使用稳定代码签名证书构建时，将 `SCREEN_STUDY_SIGNING_IDENTITY` 设置为钥匙串中的有效证书名称，并在后续更新中保持同一签名身份。没有证书的开发测试仍可设置 `SCREEN_STUDY_ALLOW_ADHOC_UPDATE=1`，但必须接受更新后可能需要刷新授权；不要反复重建当前已授权的应用。
+
+临时签名版本更新后无法截图时，完整退出应用，在系统设置的“隐私与安全 → 录屏与系统录音”移除旧条目，再添加当前 `dist/ScreenStudyAssistant.app` 并允许，然后重新打开。仅刷新本应用的条目，无需修改其他应用权限。
+
 ## 使用
 
 1. 填写 **API URL、API Key、模型名称**。接口需兼容 Chat Completions。
