@@ -1,0 +1,11 @@
+{
+  "name": "screen-study-math-renderer",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "mathjax-full": "3.2.2"
+  }
+}
