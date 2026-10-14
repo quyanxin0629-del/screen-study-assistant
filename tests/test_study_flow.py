@@ -135,13 +135,13 @@ def test_choices_continue_answer_and_save_only_confirmed_question(tmp_path, monk
     try:
         controller.ocr_finished("MCP")
         wait_until(lambda: controller.pending_clarification is not None and not controller.tasks)
-        assert len(controller.answer.choice_buttons) == 3
+        assert len(controller.answer.choice_buttons) == 2
+        assert controller.answer.custom_direction.isVisible()
+        assert controller.answer.custom_direction.parent() is controller.answer.custom_choice
         assert not controller.qa_path
         assert not NoteStore(controller.settings.notes_dir).qa_path.exists()
         assert not controller.answer.turns
         if custom:
-            QTest.mouseClick(controller.answer.choice_buttons[-1], Qt.LeftButton)
-            assert controller.answer.custom_direction.isVisible()
             controller.answer.custom_direction.setText(direction)
             QTest.keyClick(controller.answer.custom_direction, Qt.Key_Return)
         else:
@@ -174,7 +174,8 @@ def test_close_or_reset_dismisses_pending_choices_without_submitting():
     window.clarified.connect(selected.append)
     window.show()
     window.show_clarification("哪个领域？", ["AI", "医学"])
-    QTest.mouseClick(window.choice_buttons[-1], Qt.LeftButton)
+    assert window.custom_direction.isVisible()
+    assert not window.custom_confirm.isEnabled()
     QTest.keyClick(window.custom_direction, Qt.Key_Return)
     assert not selected
     window.reset()
@@ -184,3 +185,50 @@ def test_close_or_reset_dismisses_pending_choices_without_submitting():
     assert not selected
     window.close()
     window.deleteLater()
+
+
+def test_answer_after_choice_instructs_model_to_answer_without_reasking():
+    calls = []
+
+    def handler(request):
+        payload = json.loads(request.content)
+        calls.append(payload)
+        assert "不允许再次反问" in payload["messages"][0]["content"]
+        result = envelope({"action": "answer", "question": "什么是苹果 iOS？"},
+                          "iOS 是苹果手机使用的操作系统。原文的其他部分不足以确定。")
+        return httpx.Response(200, json={"choices": [{"message": {"content": result}}]})
+
+    client = ChatClient(Settings("https://test.invalid/v1", "model"),
+                        transport=httpx.MockTransport(handler))
+    result = client.study([{"role": "user", "content": "已确认方向：苹果 iOS"}],
+                          lambda _: None, Event(), allow_clarification=False)
+    assert result.action == "answer" and len(calls) == 1
+
+
+@pytest.mark.parametrize("repair_succeeds", [True, False])
+def test_second_clarification_is_repaired_once_and_never_exposed(repair_succeeds):
+    calls, chunks = [], []
+
+    def handler(request):
+        calls.append(json.loads(request.content))
+        meta = {"action": "clarify", "prompt": "还要问一次？", "options": ["A", "B"]}
+        body = ""
+        if len(calls) == 2 and repair_succeeds:
+            meta = {"action": "answer", "question": "怎样理解已确认的 iOS？"}
+            body = "以下只解释能够确认的概念。"
+        return httpx.Response(200, json={"choices": [{"message": {
+            "content": envelope(meta, body)
+        }}]})
+
+    client = ChatClient(Settings("https://test.invalid/v1", "model"),
+                        transport=httpx.MockTransport(handler))
+    if repair_succeeds:
+        result = client.study([], chunks.append, Event(), allow_clarification=False)
+        assert result.action == "answer"
+        assert "".join(chunks).strip() == result.answer
+    else:
+        with pytest.raises(ApiError):
+            client.study([], chunks.append, Event(), allow_clarification=False)
+        assert not chunks
+    assert len(calls) == 2
+    assert "还要问一次" not in "".join(chunks)

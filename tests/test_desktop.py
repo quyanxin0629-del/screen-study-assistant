@@ -451,6 +451,78 @@ def test_note_failure_does_not_disable_answer_or_followup(controller, monkeypatc
     assert not controller.busy
 
 
+def test_one_clarification_budget_survives_followups_and_retry_resets_for_new_capture(
+    controller, monkeypatch
+):
+    import json
+
+    import httpx
+
+    import screen_study_assistant.app as application
+    from screen_study_assistant.api import ChatClient
+
+    requests = []
+
+    def handler(request):
+        messages = json.loads(request.content)["messages"]
+        if "只返回 JSON" in messages[0]["content"]:
+            raw = "null"
+        else:
+            allowed = "不允许再次反问" not in messages[0]["content"]
+            requests.append((allowed, messages))
+            if allowed:
+                meta = {"action": "clarify", "prompt": "你指哪个方向？", "options": ["苹果 iOS", "其他系统"]}
+                body = ""
+            else:
+                assert any("苹果 iOS" in m["content"] for m in messages[1:])
+                meta = {"action": "answer", "question": "怎样理解苹果 iOS？"}
+                body = "只解释可以确认的内容。"
+            raw = "<study>" + json.dumps(meta, ensure_ascii=False) + "</study>\n" + body
+        return httpx.Response(200, json={"choices": [{"message": {"content": raw}}]})
+
+    class MockClient(ChatClient):
+        def __init__(self, settings, key=""):
+            super().__init__(settings, key, httpx.MockTransport(handler))
+
+    monkeypatch.setattr(application, "ChatClient", MockClient)
+    monkeypatch.setattr("keyring.get_password", lambda *_: "")
+    monkeypatch.setattr(application, "recognize_details", lambda *_: "MCP")
+    controller.settings.api_url = "https://test.invalid/v1"
+    controller.settings.model = "test-model"
+    controller.session_settings = controller.settings
+    controller.session_key = "test-only"
+    controller.answer.show()
+
+    def wait(predicate):
+        for _ in range(250):
+            if predicate():
+                return
+            QTest.qWait(10)
+        assert predicate()
+
+    controller.ocr_finished("iOS 反")
+    wait(lambda: controller.pending_clarification is not None and not controller.tasks)
+    assert controller.clarification_used
+    assert controller.answer.custom_direction.isVisible()
+    controller.answer.custom_direction.setText("苹果 iOS")
+    QTest.keyClick(controller.answer.custom_direction, Qt.Key_Return)
+    wait(lambda: len(controller.answer.turns) == 1 and not controller.tasks
+         and not controller.io.pending)
+    assert controller.confirmed_direction == "苹果 iOS"
+    controller.followup("再解释一下")
+    wait(lambda: len(controller.answer.turns) == 2 and not controller.tasks
+         and not controller.io.pending)
+    controller.retry("iOS 反")
+    wait(lambda: len(controller.answer.turns) == 1 and not controller.tasks
+         and not controller.io.pending)
+    assert controller.clarification_used and controller.confirmed_direction == "苹果 iOS"
+    assert [allowed for allowed, _ in requests] == [True, False, False, False]
+    controller.process_capture(b"synthetic", QPoint(100, 100))
+    wait(lambda: controller.pending_clarification is not None and not controller.tasks)
+    assert not controller.confirmed_direction
+    assert [allowed for allowed, _ in requests] == [True, False, False, False, True]
+
+
 def test_slow_concept_lookup_never_delays_model_request(controller, monkeypatch):
     from threading import Event
 
