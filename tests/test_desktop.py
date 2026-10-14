@@ -246,7 +246,9 @@ def test_full_ocr_api_followup_local_notes_pipeline(app, tmp_path, monkeypatch):
                 ensure_ascii=False,
             )
         else:
-            answer = "学习相似关系，让相似样本靠近。"
+            question = "什么是对比学习？" if len(requests) == 1 else "如何举例理解对比学习？"
+            answer = '<study>' + json.dumps({"action": "answer", "question": question},
+                                          ensure_ascii=False) + '</study>\n学习相似关系，让相似样本靠近。'
         return httpx.Response(200, json={"choices": [{"message": {"content": answer}}]})
 
     class MockClient(ChatClient):
@@ -294,7 +296,9 @@ def test_full_ocr_api_followup_local_notes_pipeline(app, tmp_path, monkeypatch):
         )
     )
     body = controller.qa_path.read_text(encoding="utf-8")
-    assert "**再举一个例子**" in body
+    assert "**什么是对比学习？**" in body
+    assert "**如何举例理解对比学习？**" in body
+    assert "Contrastive Learning" not in body
     assert "## 问题" not in body and "## 回答" not in body
     assert "<!-- entry:" not in body
     assert len(json.loads((tmp_path / "notes" / ".学习笔记索引.json").read_text())["entries"]) == 2
@@ -398,7 +402,7 @@ def test_note_writes_are_async_ordered_and_survive_closed_answer(controller, mon
     controller.text = "第一个截图中的问题"
     controller.concept_ready = True  # Isolate persistence from model calls.
     controller.answer.show()
-    controller.answer.start_answer("解释这段内容")
+    controller.answer.start_answer("整理后的问题是什么？")
     try:
         controller.answer_finished("第一个回答")
         assert started.wait(0.5)
@@ -419,7 +423,8 @@ def test_note_writes_are_async_ordered_and_survive_closed_answer(controller, mon
     assert not controller.io.pending
     content = NoteStore(controller.settings.notes_dir).qa_path.read_text(encoding="utf-8")
     assert content.index("第一个回答") < content.index("第二个回答")
-    assert "**第一个截图中的问题**" in content
+    assert "**整理后的问题是什么？**" in content
+    assert "第一个截图中的问题" not in content
     assert len(calls) == 2
     assert all(name.startswith("local-notes") for _, name in calls)
 
