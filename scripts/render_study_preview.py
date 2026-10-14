@@ -72,6 +72,8 @@ window.grab().save(str(args.output / "澄清选项预览.png"))
 if args.native:
     def ready():
         print("native_glass=" + str(window.native_glass), flush=True)
+        if window._frost is not None:
+            print("native_blur_alpha=" + str(window._frost.alphaValue()), flush=True)
 
     QTimer.singleShot(1000, ready)
     raise SystemExit(app.exec())
