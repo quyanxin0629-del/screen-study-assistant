@@ -14,8 +14,10 @@ from .config import app_directory
 
 
 class GlassWindow(QWidget):
-    def __init__(self):
-        super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+    def __init__(self, flags=None):
+        if flags is None:
+            flags = Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+        super().__init__(None, flags)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.native_glass = False
         self._effect = None
@@ -124,6 +126,8 @@ class GlassWindow(QWidget):
                 window.setOpaque_(False)
                 window.setBackgroundColor_(AppKit.NSColor.clearColor())
                 window.setHasShadow_(True)
+                if not self.windowFlags() & Qt.FramelessWindowHint:
+                    window.setTitlebarAppearsTransparent_(True)
                 self._effect = effect
                 self.native_glass = True
             elif sys.platform == "win32":

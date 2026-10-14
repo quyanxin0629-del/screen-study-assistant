@@ -46,7 +46,7 @@ from .notes import format_question
 
 STYLE = """
 QWidget { color: #20232C; font-family: 'SF Pro Display', 'PingFang SC', sans-serif; font-size: 13px; }
-QWidget#settings { background: #F4F5F8; }
+QWidget#settings { background: transparent; }
 QScrollArea { border: none; background: transparent; }
 QScrollArea > QWidget > QWidget { background: transparent; }
 QLabel { background: transparent; }
@@ -99,6 +99,47 @@ QScrollBar:vertical { border: none; background: transparent; width: 5px; margin:
 QScrollBar::handle:vertical { background: #D3D8E3; border-radius: 2px; min-height: 24px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+QWidget#settings QScrollArea, QWidget#settings QScrollArea > QWidget,
+QWidget#settings QScrollArea > QWidget > QWidget { background: transparent; border: none; }
+QWidget#settings QFrame#card {
+    background: rgba(255,255,255,75);
+    border: 1px solid rgba(255,255,255,185); border-radius: 22px;
+}
+QWidget#settings QLineEdit {
+    background: rgba(255,255,255,125); border: 1px solid rgba(255,255,255,205);
+    border-radius: 12px; padding: 10px 12px;
+}
+QWidget#settings QLineEdit:focus {
+    background: rgba(255,255,255,165); border-color: rgba(70,125,235,165);
+}
+QWidget#settings QPushButton {
+    background: rgba(255,255,255,105); border: 1px solid rgba(255,255,255,160);
+    border-radius: 12px;
+}
+QWidget#settings QPushButton:hover { background: rgba(255,255,255,155); }
+QWidget#settings QPushButton:pressed { background: rgba(215,228,250,155); }
+QWidget#settings QPushButton:disabled { background: rgba(240,243,248,90); }
+QWidget#settings QPushButton#primary {
+    background: rgba(37,117,245,235); color: white; border-color: rgba(255,255,255,85);
+}
+QWidget#settings QPushButton#primary:hover { background: rgba(30,104,228,245); }
+QWidget#settings QPushButton#primary:pressed { background: rgba(25,92,209,245); }
+QWidget#settings QPushButton#primary:disabled { background: rgba(150,184,239,150); }
+QWidget#settings QPushButton#link { background: transparent; border: none; }
+QWidget#settings QLabel#muted, QWidget#settings QLabel#subtitle,
+QWidget#settings QLabel#section, QWidget#settings QLabel#eyebrow { color: #657183; }
+QWidget#settings QLabel#badge {
+    background: rgba(217,244,231,135); border: 1px solid rgba(255,255,255,170);
+    color: #2D795B;
+}
+QWidget#settings QFrame#divider { background: rgba(110,130,165,40); border: none; }
+QWidget#settings QKeySequenceEdit, QWidget#settings QComboBox {
+    background: rgba(255,255,255,105); border: 1px solid rgba(255,255,255,160);
+    border-radius: 12px;
+}
+QWidget#settings QKeySequenceEdit QLineEdit,
+QWidget#settings QKeySequenceEdit QLineEdit:focus { background: transparent; border: none; }
+QWidget#settings QScrollBar::handle:vertical { background: rgba(97,112,138,75); }
 """
 
 
@@ -169,7 +210,7 @@ class ShortcutEdit(QKeySequenceEdit):
         return super().eventFilter(watched, event)
 
 
-class SettingsWindow(QWidget):
+class SettingsWindow(GlassWindow):
     save_requested = Signal()
     test_requested = Signal()
     clear_requested = Signal()
@@ -178,7 +219,7 @@ class SettingsWindow(QWidget):
     hidden = Signal()
 
     def __init__(self, settings: Settings, shortcut: str):
-        super().__init__()
+        super().__init__(Qt.Window)
         self.setObjectName("settings")
         self.setWindowTitle("屏幕学习助手 · 模型设置")
         self.setWindowIcon(QIcon(icon_pixmap()))
@@ -188,10 +229,13 @@ class SettingsWindow(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
+        scroll.setAutoFillBackground(False)
+        scroll.viewport().setAutoFillBackground(False)
         scroll.setWidgetResizable(True)
         outer.addWidget(scroll)
         content = QWidget()
         scroll.setWidget(content)
+        content.setAutoFillBackground(False)
         layout = QVBoxLayout(content)
         layout.setContentsMargins(32, 25, 32, 20)
         layout.setSpacing(12)
