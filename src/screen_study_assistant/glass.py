@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import math
 import sys
 
 from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QGuiApplication, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
+
+from .config import app_directory
 
 
 class GlassWindow(QWidget):
@@ -17,9 +21,47 @@ class GlassWindow(QWidget):
         self._effect = None
         self._frost = None
         self._native_attempted = False
+        self.blur_strength = 0.40
+        self._appearance_path = app_directory() / "appearance.json"
+        self._appearance_stamp = object()
+        self._refresh_appearance()
+        self._appearance_timer = QTimer(self)
+        self._appearance_timer.setInterval(800)
+        self._appearance_timer.timeout.connect(self._refresh_appearance)
+        self._appearance_timer.start()
+
+    def _refresh_appearance(self):
+        """Reload only numeric appearance data; never modify the signed bundle."""
+        try:
+            stat = self._appearance_path.stat()
+            stamp = (stat.st_mtime_ns, stat.st_size)
+        except FileNotFoundError:
+            stat, stamp = None, None
+        except OSError:
+            return
+        if stamp == self._appearance_stamp:
+            return
+        self._appearance_stamp = stamp
+        strength = 0.40
+        if stat is not None:
+            try:
+                if stat.st_size > 8192:
+                    return
+                data = json.loads(self._appearance_path.read_text(encoding="utf-8"))
+                strength = data["blur_strength"]
+                if (isinstance(strength, bool) or not isinstance(strength, (int, float))
+                        or not math.isfinite(strength) or not 0 <= strength <= 1):
+                    return
+            except (OSError, ValueError, TypeError, KeyError):
+                return
+        self.blur_strength = float(strength)
+        if self._frost is not None:
+            self._frost.setAlphaValue_(self.blur_strength)
+        self.update()
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._refresh_appearance()
         if not self._native_attempted and QGuiApplication.platformName() != "offscreen":
             self._native_attempted = True
             QTimer.singleShot(0, self._enable_native)
@@ -52,7 +94,7 @@ class GlassWindow(QWidget):
                     frost.setAppearance_(
                         AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameAqua)
                     )
-                    frost.setAlphaValue_(0.30)
+                    frost.setAlphaValue_(self.blur_strength)
                     frost.setAutoresizingMask_(18)
                     frost.setWantsLayer_(True)
                     frost.layer().setCornerRadius_(28)
@@ -115,7 +157,7 @@ class GlassWindow(QWidget):
         path = QPainterPath()
         path.addRoundedRect(rect, 28, 28)
         gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        alpha = 72 if self.native_glass else 165
+        alpha = round(48 + 80 * self.blur_strength) if self.native_glass else 165
         gradient.setColorAt(0, QColor(255, 255, 255, alpha))
         gradient.setColorAt(0.48, QColor(247, 248, 252, alpha))
         gradient.setColorAt(1, QColor(235, 239, 247, alpha))
