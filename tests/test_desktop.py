@@ -37,6 +37,39 @@ def test_single_settings_page_and_key_visibility(app):
     page.deleteLater()
 
 
+def test_glass_changes_live_without_restarting_or_reading_credentials(app, tmp_path, monkeypatch):
+    import json
+
+    import screen_study_assistant.glass as glass
+
+    monkeypatch.setattr(glass, "app_directory", lambda: tmp_path)
+    monkeypatch.setattr("keyring.get_password", lambda *_: pytest.fail("Unexpected vault access"))
+    window = glass.GlassWindow()
+    values = []
+    window._frost = type("Blur", (), {"setAlphaValue_": lambda _self, v: values.append(v)})()
+    window.show()
+    assert window.blur_strength == 0.40
+    path = tmp_path / "appearance.json"
+    path.write_text(json.dumps({"blur_strength": 0.55}))
+    for _ in range(120):
+        if window.blur_strength == 0.55:
+            break
+        QTest.qWait(10)
+    assert window.blur_strength == 0.55 and values == [0.55]
+    for invalid in [float("nan"), 2, -1, True, "0.8"]:
+        path.write_text(json.dumps({"blur_strength": invalid}))
+        window._refresh_appearance()
+        assert window.blur_strength == 0.55
+    path.write_text("invalid json")
+    window._refresh_appearance()
+    assert window.blur_strength == 0.55
+    path.unlink()
+    window._refresh_appearance()
+    assert window.blur_strength == 0.40
+    assert values == [0.55, 0.40]
+    window.deleteLater()
+
+
 @pytest.fixture
 def controller(app, tmp_path, monkeypatch):
     import screen_study_assistant.app as application
