@@ -149,7 +149,78 @@ class NoteStore:
             temporary = self.qa_path.with_suffix(".tmp")
             temporary.write_text("".join(pieces), encoding="utf-8")
             temporary.replace(self.qa_path)
+        self._recover_sessions_locked(index)
         return index
+
+    def _replace_notebook(self, text):
+        temporary = self.qa_path.with_suffix(".tmp")
+        with temporary.open("w", encoding="utf-8", newline="") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(self.qa_path)
+
+    def _read_notebook(self):
+        with self.qa_path.open(encoding="utf-8", newline="") as stream:
+            return stream.read()
+
+    def _recover_sessions_locked(self, index):
+        for record in index["entries"].values():
+            pending = record.get("pending") if record.get("kind") == "session" else None
+            if not pending:
+                continue
+            text = self._read_notebook()
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            if digest == pending["before_hash"]:
+                old = record.get("content", "")
+                if old:
+                    if text.count(old) != 1:
+                        raise OSError("笔记已被外部修改，保留现有内容")
+                    text = text.replace(old, pending["content"], 1)
+                else:
+                    text += pending["content"]
+                self._replace_notebook(text)
+            elif digest != pending["after_hash"]:
+                raise OSError("笔记已被外部修改，保留现有内容")
+            record.update({key: pending[key] for key in ("content", "revision", "organized")})
+            record["state"] = "done"
+            del record["pending"]
+            self._save_index(index)
+
+    def save_session(self, question: str, answer: str, session_id: str, timestamp: str,
+                     revision: int, organized: bool = False) -> Path:
+        """Replace only this capture's entry; journal before atomic notebook replacement."""
+        if not re.fullmatch(r"[a-f0-9]{32}", session_id) or revision < 1:
+            raise ValueError("Invalid note session")
+        entry = (f"\n*{timestamp}*\n\n{format_note_question(question)}\n\n"
+                 f"{format_note_answer(answer)}\n\n---\n")
+        with _APPEND_LOCK:
+            index = self._prepare_locked()
+            record = index["entries"].get(session_id)
+            if record and record.get("kind") != "session":
+                raise ValueError("Conflicting note session identifier")
+            if record and (revision, organized) <= (record["revision"], record["organized"]):
+                return self.qa_path  # a delayed summary cannot overwrite newer follow-ups
+            text = self._read_notebook()
+            old = record["content"] if record else ""
+            if old:
+                if text.count(old) != 1:
+                    raise OSError("当前笔记已被外部修改，保留现有内容")
+                replacement = text.replace(old, entry, 1)
+            else:
+                replacement = text + entry
+            if not record:
+                record = {"kind": "session", "state": "pending", "content": "",
+                          "revision": 0, "organized": False}
+                index["entries"][session_id] = record
+            record["pending"] = {
+                "content": entry, "revision": revision, "organized": organized,
+                "before_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "after_hash": hashlib.sha256(replacement.encode("utf-8")).hexdigest(),
+            }
+            self._save_index(index)
+            self._recover_sessions_locked(index)
+        return self.qa_path
 
     def prepare_notebook(self) -> Path:
         """Clean legacy entries in the same background queue used for appending."""

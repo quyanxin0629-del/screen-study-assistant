@@ -125,6 +125,10 @@ class Controller(QObject):
         self.test_task = None
         self.quitting = False
         self.qa_session_id = uuid.uuid4().hex
+        self.note_turns = []
+        self.note_revision = 0
+        self.note_timestamp = ""
+        self.note_summary_task = None
         self.io = BackgroundIO(self)
         self.io.idle.connect(self.maybe_quit)
         self.menu_bar = None
@@ -493,6 +497,11 @@ class Controller(QObject):
             self.overlay = None
         self.qa_path = None
         self.qa_session_id = uuid.uuid4().hex
+        self.note_turns = []
+        self.note_revision = 0
+        self.note_timestamp = ""
+        # A previous capture's completed note may still be organizing in the background.
+        self.note_summary_task = None
         self.pending_card = None
         self.existing_card = None
         self.concept_ready = False
@@ -616,30 +625,16 @@ class Controller(QObject):
         self.busy = False
         self.messages.append({"role": "assistant", "content": answer})
         self.answer.finish_answer(answer)  # Re-enable follow-ups before scheduling disk work.
+        self.save_session_note(self.answer.current_question, answer)
         notes = NoteStore(self.session_settings.notes_dir)
         question = self.answer.current_question
-        entry_id = uuid.uuid4().hex
-        stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
         generation = self.generation
         session_id = self.qa_session_id
         settings = self.session_settings
-        self.answer.saved.setText("保存中…")
 
         def current():
             return generation == self.generation and not self.quitting
 
-        def saved(path):
-            if current():
-                self.qa_path = path
-                self.answer.saved.setText("已保存")
-                self.answer.saved.setToolTip(str(path))
-
-        def failed():
-            if current():
-                self.answer.saved.setText("保存失败")
-                self.answer.saved.setToolTip("请检查笔记目录权限。回答仍可复制或继续追问。")
-
-        self.io.submit(lambda: notes.append_qa(question, answer, entry_id, stamp), saved, failed)
         if not self.concept_ready:
             self.concept_ready = True
             client = ChatClient(settings, self.session_key)
@@ -674,6 +669,83 @@ class Controller(QObject):
                 session=False,
             )
 
+    def save_session_note(self, question, answer):
+        self.note_turns.append({"question": question, "answer": answer})
+        self.note_revision += 1
+        if not self.note_timestamp:
+            self.note_timestamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        turns = [dict(turn) for turn in self.note_turns]
+        revision, session_id = self.note_revision, self.qa_session_id
+        stamp, generation = self.note_timestamp, self.generation
+        notes = NoteStore(self.session_settings.notes_dir)
+        multiple = len(turns) > 1
+        summary_failed = False
+        storage_failed = False
+        self.answer.saved.setText("保存中…")
+
+        def current():
+            return (not self.quitting and generation == self.generation
+                    and session_id == self.qa_session_id and revision == self.note_revision)
+
+        def saved(path, organized=False):
+            nonlocal storage_failed
+            storage_failed = False
+            if current():
+                self.qa_path = path
+                status = "已保存"
+                if multiple and not organized:
+                    status += " · 未整理" if summary_failed else " · 整理中…"
+                self.answer.saved.setText(status)
+                self.answer.saved.setToolTip(str(path))
+
+        def failed():
+            nonlocal storage_failed
+            storage_failed = True
+            if current():
+                self.answer.saved.setText("保存失败")
+                self.answer.saved.setToolTip("请检查目录权限或外部编辑。现有笔记不会被覆盖。")
+
+        # Persist all completed turns in one entry before the optional model request.
+        # If organization fails or exit cancels it, this readable fallback survives.
+        fallback_question = " ".join(dict.fromkeys(turn["question"] for turn in turns))
+        fallback_answer = "\n\n".join(turn["answer"] for turn in turns)
+        self.io.submit(
+            lambda: notes.save_session(fallback_question, fallback_answer, session_id, stamp,
+                                       revision), saved, failed,
+        )
+        if self.note_summary_task:
+            self.note_summary_task.cancel.set()
+            self.note_summary_task = None
+        if not multiple:
+            return
+        settings, key = self.session_settings, self.session_key
+
+        def organized(reply):
+            self.io.submit(
+                lambda: notes.save_session(reply.question, reply.answer, session_id, stamp,
+                                           revision, organized=True),
+                lambda path: saved(path, organized=True), failed,
+            )
+
+        def organization_failed(_message):
+            nonlocal summary_failed
+            summary_failed = True
+            if current() and not storage_failed:
+                self.answer.saved.setText("已保留完整问答 · 整理失败")
+                self.answer.saved.setToolTip("本次截图仍是一条笔记，下次追问会重新整理。")
+
+        task = self.launch_task(
+            lambda cancel, _chunk: ChatClient(settings, key).summarize_note(turns, cancel),
+            organized, organization_failed, session=False,
+        )
+        self.note_summary_task = task
+
+        def clear_summary_task():
+            if self.note_summary_task is task:
+                self.note_summary_task = None
+
+        task.finished.connect(clear_summary_task)
+
     def followup(self, question):
         if not self.text or self.busy or not self.messages or self.pending_clarification:
             return
@@ -691,6 +763,7 @@ class Controller(QObject):
         self.concept_ready = False
         self.pending_card = None
         self.answer.turns = []
+        self.note_turns = []  # corrected OCR replaces this capture, retaining its ID/revision
         self.answer.output = ""
         self.answer.encounter.hide()
         # Keep the same Q&A file for retrying, update its content on success.
