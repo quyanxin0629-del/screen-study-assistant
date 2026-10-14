@@ -267,7 +267,11 @@ def test_full_ocr_api_followup_local_notes_pipeline(app, tmp_path, monkeypatch):
     def handler(request):
         payload = json.loads(request.content)
         requests.append(payload)
-        if "只返回 JSON" in payload["messages"][0]["content"]:
+        if "合并成一条中文学习笔记" in payload["messages"][0]["content"]:
+            answer = json.dumps({"question": "什么是对比学习？如何举例理解对比学习？",
+                                 "answer": "让相似样本靠近；同一只猫的两张照片表示接近。"},
+                                ensure_ascii=False)
+        elif "只返回 JSON" in payload["messages"][0]["content"]:
             answer = json.dumps(
                 {
                     "name": "对比学习",
@@ -329,17 +333,17 @@ def test_full_ocr_api_followup_local_notes_pipeline(app, tmp_path, monkeypatch):
         )
     )
     body = controller.qa_path.read_text(encoding="utf-8")
-    assert "**什么是对比学习？**" in body
-    assert "**如何举例理解对比学习？**" in body
+    assert "**什么是对比学习？如何举例理解对比学习？**" in body
+    assert body.count("\n---\n") == 1
     assert "Contrastive Learning" not in body
     assert "## 问题" not in body and "## 回答" not in body
     assert "<!-- entry:" not in body
-    assert len(json.loads((tmp_path / "notes" / ".学习笔记索引.json").read_text())["entries"]) == 2
+    assert len(json.loads((tmp_path / "notes" / ".学习笔记索引.json").read_text())["entries"]) == 1
     assert controller.qa_path.name == "学习笔记.md"
     assert len(list((tmp_path / "notes" / "知识图鉴").glob("*.md"))) == 1
     assert all(path.suffix == ".md" or path.name == ".学习笔记索引.json"
                for path in (tmp_path / "notes").rglob("*") if path.is_file())
-    assert len(requests) == 3  # initial answer, concept extraction, follow-up
+    assert len(requests) == 4  # initial answer, concept, follow-up, background organization
     controller.answer.close()
     assert not controller.answer.isVisible()
     controller.io.shutdown()
@@ -420,17 +424,19 @@ def test_note_writes_are_async_ordered_and_survive_closed_answer(controller, mon
     from screen_study_assistant.notes import NoteStore
 
     started, release = Event(), Event()
-    real_append = NoteStore.append_qa
+    real_save = NoteStore.save_session
     calls = []
 
-    def slow_append(store, question, answer, entry_id, timestamp):
+    def slow_save(store, question, answer, entry_id, timestamp, revision, organized=False):
         calls.append((question, current_thread().name))
         if len(calls) == 1:
             started.set()
             assert release.wait(3)
-        return real_append(store, question, answer, entry_id, timestamp)
+        return real_save(store, question, answer, entry_id, timestamp, revision, organized)
 
-    monkeypatch.setattr(NoteStore, "append_qa", slow_append)
+    monkeypatch.setattr(NoteStore, "save_session", slow_save)
+    monkeypatch.setattr("screen_study_assistant.app.ChatClient.summarize_note",
+                        lambda *_: (_ for _ in ()).throw(RuntimeError("test-only failure")))
     controller.session_settings = controller.settings
     controller.text = "第一个截图中的问题"
     controller.concept_ready = True  # Isolate persistence from model calls.
@@ -456,7 +462,8 @@ def test_note_writes_are_async_ordered_and_survive_closed_answer(controller, mon
     assert not controller.io.pending
     content = NoteStore(controller.settings.notes_dir).qa_path.read_text(encoding="utf-8")
     assert content.index("第一个回答") < content.index("第二个回答")
-    assert "**整理后的问题是什么？**" in content
+    assert "**整理后的问题是什么？ 再举个例子**" in content
+    assert content.count("\n---\n") == 1
     assert "第一个截图中的问题" not in content
     assert len(calls) == 2
     assert all(name.startswith("local-notes") for _, name in calls)
@@ -465,10 +472,10 @@ def test_note_writes_are_async_ordered_and_survive_closed_answer(controller, mon
 def test_note_failure_does_not_disable_answer_or_followup(controller, monkeypatch):
     from screen_study_assistant.notes import NoteStore
 
-    def fail_write(*args):
+    def fail_write(*args, **kwargs):
         raise OSError("test-only disk error")
 
-    monkeypatch.setattr(NoteStore, "append_qa", fail_write)
+    monkeypatch.setattr(NoteStore, "save_session", fail_write)
     controller.session_settings = controller.settings
     controller.text = "测试问题"
     controller.concept_ready = True

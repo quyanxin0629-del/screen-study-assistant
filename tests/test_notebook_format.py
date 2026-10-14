@@ -100,3 +100,82 @@ def test_partial_write_never_overwrites_a_manual_edit(tmp_path):
     with pytest.raises(OSError):
         store.append_qa("问题", "回答", "f" * 32, "2026-10-14 15:00:00")
     assert store.qa_path.read_text() == "手动编辑，必须保留"
+
+
+def test_capture_followups_replace_one_entry_without_changing_other_captures(tmp_path):
+    store = NoteStore(tmp_path)
+    stamp = "2026-10-14 15:00:00"
+    store.save_session("什么是对比学习？", "初始答案", "a" * 32, stamp, 1)
+    store.save_session("面积是多少？", r"\[\boxed{5}\]", "b" * 32, stamp, 1)
+    other = store.qa_path.read_text().split("\n---\n")[1]
+    store.qa_path.write_bytes("# 我的笔记\r\n".encode() + store.qa_path.read_bytes())
+    store.save_session("什么是对比学习？能举例吗？", "## 解释\n\n合并后的答案",
+                       "a" * 32, stamp, 2, organized=True)
+    text = store.qa_path.read_text()
+    assert text.startswith("# 我的笔记\n")
+    assert store.qa_path.read_bytes().startswith("# 我的笔记\r\n".encode())
+    assert "初始答案" not in text and "合并后的答案" in text
+    assert text.count("\n---\n") == 2
+    assert text.split("\n---\n")[1] == other
+    assert "**什么是对比学习？能举例吗？**" in text
+    assert "## 解释" not in text and r"\boxed{5}" in text
+    assert len(json.loads(store.index_path.read_text())["entries"]) == 2
+
+
+def test_late_summaries_and_repeated_writes_cannot_undo_newer_followups(tmp_path):
+    store = NoteStore(tmp_path)
+    args = ("a" * 32, "2026-10-14 15:00:00")
+    store.save_session("问题一和二？", "两轮完整内容", *args, 2)
+    store.save_session("问题一二三？", "最新内容", *args, 3)
+    store.save_session("问题一和二？", "迟到的摘要", *args, 2, organized=True)
+    assert "迟到" not in store.qa_path.read_text()
+    store.save_session("整理的问题？", "最新整合", *args, 3, organized=True)
+    text = store.qa_path.read_text()
+    store.save_session("问题一二三？", "未整理版本", *args, 3)
+    store.save_session("整理的问题？", "重复", *args, 3, organized=True)
+    assert store.qa_path.read_text() == text
+    assert text.count("\n---\n") == 1
+
+
+@pytest.mark.parametrize("interrupt_before_replace", [False, True])
+def test_session_update_recovers_after_interruption_without_duplicate_entries(
+        tmp_path, monkeypatch, interrupt_before_replace):
+    store = NoteStore(tmp_path)
+    args = ("a" * 32, "2026-10-14 15:00:00")
+    store.save_session("问题？", "原答案", *args, 1)
+    original = store._save_index
+    calls = []
+
+    def interrupt(index):
+        calls.append(True)
+        if len(calls) == 2:
+            raise OSError("interrupted final index save")
+        original(index)
+
+    def interrupt_replace(_text):
+        raise OSError("interrupted atomic replace")
+
+    if interrupt_before_replace:
+        monkeypatch.setattr(store, "_replace_notebook", interrupt_replace)
+    else:
+        monkeypatch.setattr(store, "_save_index", interrupt)
+    with pytest.raises(OSError):
+        store.save_session("问题和追问？", "整合的答案", *args, 2, organized=True)
+    recovered = NoteStore(tmp_path)
+    recovered.prepare_notebook()
+    recovered.save_session("问题和追问？", "整合的答案", *args, 2, organized=True)
+    text = recovered.qa_path.read_text()
+    assert "原答案" not in text and "整合的答案" in text
+    assert text.count("\n---\n") == 1
+    assert "pending" not in json.loads(recovered.index_path.read_text())["entries"]["a" * 32]
+
+
+def test_session_update_preserves_manually_edited_current_entry(tmp_path):
+    store = NoteStore(tmp_path)
+    args = ("a" * 32, "2026-10-14 15:00:00")
+    store.save_session("问题？", "原答案", *args, 1)
+    store.qa_path.write_text(store.qa_path.read_text().replace("原答案", "我的理解"))
+    text = store.qa_path.read_text()
+    with pytest.raises(OSError):
+        store.save_session("更多问题？", "模型新内容", *args, 2)
+    assert store.qa_path.read_text() == text
