@@ -29,8 +29,14 @@ notes/
 data/
 logs/
 *.log
+*.tmp
 *.sqlite*
 screenshots/
+settings.json
+学习笔记.md
+.学习笔记索引.json
+.学习笔记排版前备份.md
+知识图鉴/
 *.spec
 work/
 node_modules/
