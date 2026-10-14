@@ -33,6 +33,7 @@ logs/
 *.sqlite*
 screenshots/
 settings.json
+appearance.json
 学习笔记.md
 .学习笔记索引.json
 .学习笔记排版前备份.md
