@@ -102,23 +102,24 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
 QWidget#settings QScrollArea, QWidget#settings QScrollArea > QWidget,
 QWidget#settings QScrollArea > QWidget > QWidget { background: transparent; border: none; }
 QWidget#settings QFrame#card {
-    background: rgba(255,255,255,75);
-    border: 1px solid rgba(255,255,255,185); border-radius: 22px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 rgba(240,245,253,150), stop:1 rgba(215,227,245,135));
+    border: 1px solid rgba(112,137,172,105); border-radius: 22px;
 }
 QWidget#settings QLineEdit {
-    background: rgba(255,255,255,125); border: 1px solid rgba(255,255,255,205);
+    background: rgba(210,223,242,185); border: 1px solid rgba(110,137,177,130);
     border-radius: 12px; padding: 10px 12px;
 }
 QWidget#settings QLineEdit:focus {
-    background: rgba(255,255,255,165); border-color: rgba(70,125,235,165);
+    background: rgba(229,239,254,215); border-color: rgba(55,115,230,185);
 }
 QWidget#settings QPushButton {
-    background: rgba(255,255,255,105); border: 1px solid rgba(255,255,255,160);
+    background: rgba(210,223,242,180); border: 1px solid rgba(110,137,177,120);
     border-radius: 12px;
 }
-QWidget#settings QPushButton:hover { background: rgba(255,255,255,155); }
-QWidget#settings QPushButton:pressed { background: rgba(215,228,250,155); }
-QWidget#settings QPushButton:disabled { background: rgba(240,243,248,90); }
+QWidget#settings QPushButton:hover { background: rgba(192,212,241,205); }
+QWidget#settings QPushButton:pressed { background: rgba(172,198,236,220); }
+QWidget#settings QPushButton:disabled { background: rgba(220,228,240,140); }
 QWidget#settings QPushButton#primary {
     background: rgba(37,117,245,235); color: white; border-color: rgba(255,255,255,85);
 }
@@ -134,7 +135,7 @@ QWidget#settings QLabel#badge {
 }
 QWidget#settings QFrame#divider { background: rgba(110,130,165,40); border: none; }
 QWidget#settings QKeySequenceEdit, QWidget#settings QComboBox {
-    background: rgba(255,255,255,105); border: 1px solid rgba(255,255,255,160);
+    background: rgba(210,223,242,185); border: 1px solid rgba(110,137,177,130);
     border-radius: 12px;
 }
 QWidget#settings QKeySequenceEdit QLineEdit,

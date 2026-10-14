@@ -22,6 +22,8 @@ class GlassWindow(QWidget):
         self.native_glass = False
         self._effect = None
         self._frost = None
+        self._titlebar_tint = None
+        self._native_titlebar_height = 0
         self._native_attempted = False
         self.blur_strength = 0.40
         self._appearance_path = app_directory() / "appearance.json"
@@ -59,7 +61,17 @@ class GlassWindow(QWidget):
         self.blur_strength = float(strength)
         if self._frost is not None:
             self._frost.setAlphaValue_(self.blur_strength)
+        self._update_titlebar_tint()
         self.update()
+
+    def _update_titlebar_tint(self):
+        if self._titlebar_tint is not None:
+            import Quartz
+
+            alpha = round(48 + 80 * self.blur_strength) / 255
+            self._titlebar_tint.layer().setBackgroundColor_(
+                Quartz.CGColorCreateGenericRGB(1.0, 1.0, 1.0, alpha)
+            )
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -78,18 +90,23 @@ class GlassWindow(QWidget):
 
                 view = objc.objc_object(c_void_p=ctypes.c_void_p(int(self.winId())))
                 window = view.window()
+                parent = view.superview()
+                framed = not self.windowFlags() & Qt.FramelessWindowHint
+                # A titled Qt view stops below the traffic lights. Cover the
+                # entire native frame so the titlebar receives the same blur.
+                backdrop_frame = parent.bounds() if framed else view.frame()
                 if hasattr(AppKit, "NSGlassEffectView"):
-                    effect = AppKit.NSGlassEffectView.alloc().initWithFrame_(view.frame())
+                    effect = AppKit.NSGlassEffectView.alloc().initWithFrame_(backdrop_frame)
                     effect.setStyle_(AppKit.NSGlassEffectViewStyleClear)
                     effect.setCornerRadius_(28)
                     # Preserve Qt's content view and accessibility hierarchy.
                     effect.setContentView_(AppKit.NSView.alloc().initWithFrame_(effect.bounds()))
-                    view.superview().addSubview_positioned_relativeTo_(
+                    parent.addSubview_positioned_relativeTo_(
                         effect, AppKit.NSWindowBelow, view
                     )
                     # A lightly blended native blur softens the clear glass
                     # without replacing it with the opaque regular material.
-                    frost = AppKit.NSVisualEffectView.alloc().initWithFrame_(view.frame())
+                    frost = AppKit.NSVisualEffectView.alloc().initWithFrame_(backdrop_frame)
                     frost.setMaterial_(AppKit.NSVisualEffectMaterialHUDWindow)
                     frost.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
                     frost.setState_(AppKit.NSVisualEffectStateActive)
@@ -101,16 +118,19 @@ class GlassWindow(QWidget):
                     frost.setWantsLayer_(True)
                     frost.layer().setCornerRadius_(28)
                     frost.layer().setMasksToBounds_(True)
-                    view.superview().addSubview_positioned_relativeTo_(
+                    parent.addSubview_positioned_relativeTo_(
                         frost, AppKit.NSWindowBelow, effect
                     )
                     self._frost = frost
                 else:
-                    effect = AppKit.NSVisualEffectView.alloc().initWithFrame_(view.frame())
+                    effect = AppKit.NSVisualEffectView.alloc().initWithFrame_(backdrop_frame)
                     effect.setMaterial_(AppKit.NSVisualEffectMaterialHUDWindow)
                     effect.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
                     effect.setState_(AppKit.NSVisualEffectStateActive)
-                    view.addSubview_positioned_relativeTo_(effect, AppKit.NSWindowBelow, None)
+                    if framed:
+                        parent.addSubview_positioned_relativeTo_(effect, AppKit.NSWindowBelow, view)
+                    else:
+                        view.addSubview_positioned_relativeTo_(effect, AppKit.NSWindowBelow, None)
                 effect.setAppearance_(
                     AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameAqua)
                 )
@@ -121,13 +141,28 @@ class GlassWindow(QWidget):
                 effect.layer().setCornerRadius_(28)
                 effect.layer().setMasksToBounds_(True)
                 view.setWantsLayer_(True)
-                view.layer().setCornerRadius_(28)
+                view.layer().setCornerRadius_(0 if framed else 28)
                 view.layer().setMasksToBounds_(True)
                 window.setOpaque_(False)
                 window.setBackgroundColor_(AppKit.NSColor.clearColor())
                 window.setHasShadow_(True)
-                if not self.windowFlags() & Qt.FramelessWindowHint:
+                if framed:
                     window.setTitlebarAppearsTransparent_(True)
+                    if (hasattr(window, "setTitlebarSeparatorStyle_")
+                            and hasattr(AppKit, "NSTitlebarSeparatorStyleNone")):
+                        window.setTitlebarSeparatorStyle_(AppKit.NSTitlebarSeparatorStyleNone)
+                    top = view.frame().origin.y + view.frame().size.height
+                    height = max(0, parent.bounds().size.height - top)
+                    self._native_titlebar_height = height
+                    if height:
+                        tint = AppKit.NSView.alloc().initWithFrame_(
+                            AppKit.NSMakeRect(0, top, parent.bounds().size.width, height)
+                        )
+                        tint.setWantsLayer_(True)
+                        tint.setAutoresizingMask_(AppKit.NSViewWidthSizable | AppKit.NSViewMinYMargin)
+                        parent.addSubview_positioned_relativeTo_(tint, AppKit.NSWindowBelow, view)
+                        self._titlebar_tint = tint
+                        self._update_titlebar_tint()
                 self._effect = effect
                 self.native_glass = True
             elif sys.platform == "win32":
@@ -158,6 +193,10 @@ class GlassWindow(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(self.rect()).adjusted(0.8, 0.8, -0.8, -0.8)
+        if self.native_glass and self._native_titlebar_height:
+            # Extend the painted surface past the content edge: no second pair
+            # of rounded corners or horizontal rim underneath the titlebar.
+            rect.setTop(-self._native_titlebar_height)
         path = QPainterPath()
         path.addRoundedRect(rect, 28, 28)
         gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
