@@ -52,7 +52,7 @@ class GlassWindow(QWidget):
                     frost.setAppearance_(
                         AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameAqua)
                     )
-                    frost.setAlphaValue_(0.22)
+                    frost.setAlphaValue_(0.30)
                     frost.setAutoresizingMask_(18)
                     frost.setWantsLayer_(True)
                     frost.layer().setCornerRadius_(28)
@@ -115,7 +115,7 @@ class GlassWindow(QWidget):
         path = QPainterPath()
         path.addRoundedRect(rect, 28, 28)
         gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        alpha = 64 if self.native_glass else 165
+        alpha = 72 if self.native_glass else 165
         gradient.setColorAt(0, QColor(255, 255, 255, alpha))
         gradient.setColorAt(0.48, QColor(247, 248, 252, alpha))
         gradient.setColorAt(1, QColor(235, 239, 247, alpha))
