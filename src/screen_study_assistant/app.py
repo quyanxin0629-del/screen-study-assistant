@@ -1,0 +1,725 @@
+"""Desktop orchestration: native hotkey, local OCR, API, floating answers."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from threading import Event
+
+from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QAction, QCursor, QIcon, QKeySequence
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
+from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMenuBar, QSystemTrayIcon
+
+from .api import SYSTEM_PROMPT, Cancelled, ChatClient
+from .config import ConfigStore, Settings, normalize_url
+from .hotkey import Hotkey
+from .notes import NoteStore
+from .ocr import OcrResult, recognize_details
+from .permissions import screen_capture_allowed, screen_capture_message
+from .ui import AnswerWindow, CaptureOverlay, LauncherWindow, SettingsWindow, icon_pixmap
+
+
+class Task(QThread):
+    result = Signal(object)
+    error = Signal(str)
+    chunk = Signal(str)
+
+    def __init__(self, operation, parent=None):
+        super().__init__(parent)
+        self.operation = operation
+        self.cancel = Event()
+
+    def run(self):
+        try:
+            value = self.operation(self.cancel, self.chunk.emit)
+            if not self.cancel.is_set():
+                self.result.emit(value)
+        except Cancelled:
+            pass
+        except Exception as exc:
+            if not self.cancel.is_set():
+                # Known exceptions expose user-facing errors; no headers or request bodies.
+                from .api import ApiError
+
+                message = (
+                    str(exc)
+                    if isinstance(exc, (ApiError, ValueError, RuntimeError))
+                    else "操作失败，请检查配置后重试。"
+                )
+                self.error.emit(message)
+        finally:
+            self.operation = None  # release image bytes and captured credentials
+
+
+class BackgroundIO(QObject):
+    completed = Signal(object)
+    idle = Signal()
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="local-notes")
+        self.pending = 0
+        self.completed.connect(self._complete, Qt.QueuedConnection)
+
+    def submit(self, operation, success, error):
+        self.pending += 1
+        future = self.pool.submit(operation)
+        future.add_done_callback(lambda done: self.completed.emit((done, success, error)))
+
+    def _complete(self, payload):
+        future, success, error = payload
+        self.pending -= 1
+        try:
+            value = future.result()
+        except Exception:
+            error()
+        else:
+            success(value)
+        if self.pending == 0:
+            self.idle.emit()
+
+    def shutdown(self):
+        # Drain completed answers even when the UI is closed or the app exits.
+        self.pool.shutdown(wait=False)
+
+
+class Controller(QObject):
+    def __init__(self, app: QApplication, preview=False):
+        super().__init__()
+        self.app = app
+        self.store = ConfigStore()
+        load_error = ""
+        try:
+            self.settings = self.store.load()
+        except ValueError as exc:
+            self.settings = Settings()
+            load_error = str(exc)
+        self.hotkey = Hotkey(self)
+        self.hotkey.shortcut = self.settings.shortcut
+        self.preview = preview
+        self.window = SettingsWindow(self.settings, self.hotkey.label)
+        self.answer = AnswerWindow()
+        self.launcher = LauncherWindow()
+        self.overlay = None
+        self.tasks: set[Task] = set()
+        self.session_tasks: set[Task] = set()
+        self.generation = 0
+        self.busy = False
+        self.capture_pending = False
+        self.capture_permission_requested = False
+        self.qa_path = None
+        self.text = ""
+        self.messages = []
+        self.session_settings = None
+        self.session_key = ""
+        self.concept_ready = False
+        self.pending_card = None
+        self.existing_card = None
+        self.test_task = None
+        self.quitting = False
+        self.qa_session_id = uuid.uuid4().hex
+        self.io = BackgroundIO(self)
+        self.io.idle.connect(self.maybe_quit)
+        self.menu_bar = None
+        if sys.platform == "darwin":
+            # Override Qt's default Quit, which asks hide-on-close windows to close.
+            self.menu_bar = QMenuBar()
+            app_menu = self.menu_bar.addMenu("应用")
+            self.quit_action = QAction("退出", self)
+            self.quit_action.setMenuRole(QAction.QuitRole)
+            self.quit_action.setShortcut(QKeySequence("Meta+Q"))
+            self.quit_action.triggered.connect(self.quit)
+            app_menu.addAction(self.quit_action)
+
+        self.window.save_requested.connect(self.save_settings)
+        self.window.test_requested.connect(self.test_connection)
+        self.window.clear_requested.connect(self.clear_key)
+        self.window.directory_requested.connect(self.choose_directory)
+        self.window.notes_requested.connect(self.open_notes)
+        self.window.url.textChanged.connect(self.url_changed)
+        self.window.shortcut.recording_changed.connect(self.record_shortcut)
+        self.answer.submitted.connect(self.followup)
+        self.answer.retry_requested.connect(self.retry)
+        self.answer.cancelled.connect(self.cancel_session)
+        self.answer.settings_requested.connect(self.show_settings)
+        self.answer.notes_requested.connect(self.open_notes)
+        self.answer.closed.connect(self.show_launcher)
+        self.window.hidden.connect(self.show_launcher)
+        self.launcher.capture_requested.connect(self.capture)
+        self.launcher.settings_requested.connect(self.show_settings)
+        self.launcher.notes_requested.connect(self.open_notes)
+        self.hotkey.activated.connect(self.capture, Qt.QueuedConnection)
+        self.tray = QSystemTrayIcon(QIcon(icon_pixmap()), self)
+        self.tray.setToolTip("屏幕学习助手 · " + self.hotkey.label)
+        menu = QMenu()
+        self.capture_action = menu.addAction("框选并解释  " + self.hotkey.label, self.capture)
+        menu.addAction("模型设置", self.show_settings)
+        menu.addAction("打开本地笔记", self.open_notes)
+        menu.addAction("显示快捷工具条", self.show_launcher)
+        menu.addSeparator()
+        menu.addAction("退出", self.quit)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(
+            lambda reason: (
+                self.show_settings()
+                if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick)
+                else None
+            )
+        )
+        if not preview:
+            self.tray.show()
+            try:
+                self.hotkey.start(self.settings.shortcut)
+                self.window.hotkey_status.setText("快捷键已就绪 · 关闭此窗口后仍在菜单栏运行")
+            except Exception as exc:
+                self.window.hotkey_status.setText(str(exc))
+                self.window.hotkey_status.setStyleSheet("color: #D65C5C;")
+        else:
+            self.window.hotkey_status.setText("界面预览 · 未注册全局快捷键")
+        self.window.clear_key.setEnabled(bool(self.settings.api_url))
+        if self.settings.api_url:
+            self.window.key.setPlaceholderText("留空以继续使用已保存的密钥；本地服务可不填")
+        if load_error:
+            self.window.show_status(load_error, True)
+        geometry = app.primaryScreen().availableGeometry()
+        self.window.resize(590, min(805, geometry.height() - 60))
+        self.window.move(geometry.center() - self.window.rect().center())
+        self.window.show()
+
+    def launch_task(self, operation, success, error=None, chunk=None, session=False):
+        task = Task(operation, self)
+        self.tasks.add(task)
+        generation = self.generation
+        if session:
+            self.session_tasks.add(task)
+
+        def valid():
+            return (
+                not self.quitting
+                and not task.cancel.is_set()
+                and (not session or generation == self.generation)
+            )
+
+        task.result.connect(lambda value: success(value) if valid() else None)
+        task.error.connect(lambda message: (error or self.fail)(message) if valid() else None)
+        if chunk:
+            task.chunk.connect(lambda value: chunk(value) if valid() else None)
+
+        def cleanup():
+            self.tasks.discard(task)
+            self.session_tasks.discard(task)
+            task.deleteLater()
+            self.maybe_quit()
+
+        task.finished.connect(cleanup)
+        task.start()
+        return task
+
+    def show_settings(self):
+        self.window.show()
+        self.window.raise_()
+        self.window.activateWindow()
+        self.launcher.hide()
+
+    def show_launcher(self):
+        if not self.quitting and not self.capture_pending:
+            self.launcher.show()
+            self.launcher.raise_()
+
+    def open_notes(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        settings = self.session_settings if self.answer.isVisible() else self.settings
+        notes = NoteStore((settings or self.settings).notes_dir)
+
+        def prepare():
+            return notes.prepare_notebook()
+
+        def failed():
+            if not self.quitting:
+                self.show_settings()
+                self.window.show_status("无法打开学习笔记，请检查保存位置。", True)
+
+        def opened(path):
+            if not self.quitting and not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+                failed()
+
+        self.io.submit(prepare, opened, failed)
+
+    def draft(self, require_model=True) -> tuple[Settings, str]:
+        settings = Settings(
+            self.window.url.text(),
+            self.window.model.text(),
+            self.window.notes_dir,
+            self.window.shortcut.keySequence().toString(QKeySequence.PortableText),
+            self.window.ocr_device.currentData(),
+        ).validate()
+        if require_model and not settings.model:
+            raise ValueError("请填写 API URL 和模型名称（模型 ID）。")
+        key = self.window.key.text().strip()
+        # Only reuse a stored key for the currently saved, unchanged endpoint.
+        if (
+            not key
+            and self.settings.api_url
+            and normalize_url(self.settings.api_url) == settings.api_url
+        ):
+            try:
+                key = self.store.get_key(settings.api_url)
+            except Exception as exc:
+                raise ValueError("无法读取系统钥匙串，请重新填写 API Key。") from exc
+        return settings, key
+
+    def url_changed(self):
+        # This field only contains a key explicitly typed by the user; stored keys
+        # are never filled into it. Editing the URL must not erase that input.
+        # draft() separately prevents reusing a stored key for another endpoint.
+        try:
+            same = bool(self.settings.api_url) and normalize_url(
+                self.window.url.text()
+            ) == normalize_url(self.settings.api_url)
+        except ValueError:
+            same = False
+        self.window.key.setPlaceholderText(
+            "留空以继续使用已保存的密钥" if same else "填写此服务的 API Key；本地服务可留空"
+        )
+        self.window.clear_key.setEnabled(same)
+        if self.window.key.text():
+            self.window.key_state.setText("已保留手动输入的密钥，请确认它适用于当前 API 地址。")
+        else:
+            self.window.key_state.setText(
+                "密钥保存在系统钥匙串。" if same else "新服务不会自动使用旧服务已保存的密钥。"
+            )
+
+    def save_settings(self):
+        candidate = None
+        try:
+            settings, key = self.draft(require_model=False)
+            new_key = self.window.key.text().strip()
+            new_endpoint = (
+                not self.settings.api_url
+                or not settings.api_url
+                or normalize_url(self.settings.api_url) != settings.api_url
+            )
+            if not self.preview and (
+                settings.shortcut != self.settings.shortcut or not self.hotkey.active
+            ):
+                candidate = Hotkey(self)
+                candidate.activated.connect(self.capture, Qt.QueuedConnection)
+                candidate.start(settings.shortcut)
+            # A new endpoint with an empty key is explicitly saved as unauthenticated.
+            self.store.save(
+                settings,
+                key=new_key if new_key else None,
+                clear_key=new_endpoint and not new_key,
+            )
+            self.settings = settings
+            if candidate:
+                old = self.hotkey
+                old.stop()
+                self.hotkey = candidate
+                old.deleteLater()
+                candidate = None
+            elif self.preview:
+                self.hotkey.shortcut = settings.shortcut
+            self.tray.setToolTip("屏幕学习助手 · " + self.hotkey.label)
+            self.capture_action.setText("框选并解释  " + self.hotkey.label)
+            self.window.hotkey_status.setText("快捷键已就绪 · " + self.hotkey.label)
+            self.window.hotkey_status.setStyleSheet("")
+            self.window.key.clear()
+            self.window.key.setEchoMode(self.window.key.EchoMode.Password)
+            self.window.show_key.setText("显示")
+            self.window.key_state.setText("密钥已安全保存。" if key else "当前服务未设置密钥。")
+            self.window.key.setPlaceholderText("留空以继续使用已保存的密钥")
+            self.window.clear_key.setEnabled(bool(settings.api_url))
+            self.window.show_status("设置已保存 · 可以使用 " + self.hotkey.label + " 框选文字")
+        except Exception as exc:
+            if candidate:
+                candidate.stop()
+                candidate.deleteLater()
+            message = (
+                str(exc)
+                if isinstance(exc, (ValueError, RuntimeError))
+                else "保存失败，请检查系统钥匙串和配置目录权限。"
+            )
+            self.window.show_status(message, True)
+
+    def record_shortcut(self, recording):
+        if self.preview or self.quitting:
+            return
+        if recording:
+            self.hotkey.stop()
+            self.window.hotkey_status.setText("正在录入快捷键，原快捷键暂时停用…")
+        else:
+            try:
+                self.hotkey.start(self.settings.shortcut)
+                self.window.hotkey_status.setText(
+                    "当前快捷键 · " + self.hotkey.label + " · 保存设置后更新"
+                )
+            except RuntimeError as exc:
+                self.window.hotkey_status.setText(str(exc))
+
+    def clear_key(self):
+        try:
+            if not self.settings.api_url:
+                return
+            self.store.save(self.settings, clear_key=True)
+            self.window.key.clear()
+            self.window.key_state.setText("已清除保存的密钥。")
+            self.window.show_status("密钥已清除，后续新请求不再使用原密钥。")
+        except Exception:
+            self.window.show_status("清除失败，请检查系统钥匙串权限。", True)
+
+    def test_connection(self):
+        if self.test_task and self.test_task.isRunning():
+            return
+        try:
+            settings, key = self.draft()
+        except Exception as exc:
+            self.window.show_status(str(exc), True)
+            return
+        self.window.test_button.setEnabled(False)
+        self.window.test_button.setText("连接中…")
+        self.window.show_status("正在测试当前表单中的模型配置…")
+        client = ChatClient(settings, key)
+
+        def finish(message, error=False):
+            self.window.test_button.setEnabled(True)
+            self.window.test_button.setText("测试连接")
+            self.window.show_status(message, error)
+            self.test_task = None
+
+        self.test_task = self.launch_task(
+            lambda cancel, _chunk: client.test(cancel),
+            lambda _result: finish("连接成功 · 当前文本模型接口可用，请保存设置"),
+            lambda message: finish(message, True),
+        )
+
+    def choose_directory(self):
+        directory = QFileDialog.getExistingDirectory(
+            self.window, "选择本地笔记文件夹", self.window.notes_dir
+        )
+        if directory:
+            self.window.notes_dir = directory
+            self.window.show_status("已选择保存位置，请点击保存设置。")
+
+    def cancel_session(self):
+        self.generation += 1
+        for task in self.session_tasks:
+            task.cancel.set()
+        self.busy = False
+        self.session_key = ""
+        self.answer.busy(False)
+        if self.answer.isVisible():
+            self.answer.phase.setText("已停止 · 可修改识别文字后重新解答")
+
+    def capture(self):
+        if self.quitting or self.capture_pending or (self.overlay and self.overlay.isVisible()):
+            return
+        if not self.settings.api_url or not self.settings.model:
+            self.show_settings()
+            self.window.show_status("请先填写 API URL、模型名称并保存设置。", True)
+            return
+        if sys.platform == "darwin":
+            import Quartz
+
+            allowed = screen_capture_allowed(
+                Quartz, may_request=not self.capture_permission_requested
+            )
+            self.capture_permission_requested = True
+            if not allowed:
+                self.show_settings()
+                self.window.show_status(screen_capture_message(), True)
+                return
+            self.window.show_status("截图权限已就绪。")
+        try:
+            # The vault is read once per endpoint per process, not once per screenshot.
+            key = self.store.get_key(self.settings.api_url)
+        except Exception:
+            self.show_settings()
+            self.window.show_status("无法读取密钥，请重新填写并保存。", True)
+            return
+        self.cancel_session()
+        self.session_settings = Settings(
+            self.settings.api_url,
+            self.settings.model,
+            self.settings.notes_dir,
+            self.settings.shortcut,
+            self.settings.ocr_device,
+        )
+        self.session_key = key
+        self.answer.hide()
+        self.window.hide()
+        self.launcher.hide()
+        self.capture_pending = True
+        # Let native windows disappear before capturing the frozen background.
+        QTimer.singleShot(180, self.capture_screen)
+
+    def capture_screen(self):
+        self.capture_pending = False
+        screen = self.app.screenAt(QCursor.pos()) or self.app.primaryScreen()
+        pixmap = screen.grabWindow(0)
+        if pixmap.isNull():
+            self.show_settings()
+            self.window.show_status("无法捕获屏幕，请检查屏幕录制权限。", True)
+            return
+        self.overlay = CaptureOverlay(screen, pixmap)
+        self.overlay.selected.connect(self.process_capture)
+        self.overlay.dismissed.connect(self.capture_dismissed)
+        self.overlay.show()
+        self.overlay.raise_()
+        self.overlay.activateWindow()
+        self.overlay.setFocus()
+
+    def capture_dismissed(self):
+        self.show_launcher()
+        self.session_key = ""
+        if self.overlay:
+            self.overlay.deleteLater()
+            self.overlay = None
+
+    def process_capture(self, png: bytes, point):
+        if self.overlay:
+            self.overlay.deleteLater()
+            self.overlay = None
+        self.qa_path = None
+        self.qa_session_id = uuid.uuid4().hex
+        self.pending_card = None
+        self.existing_card = None
+        self.concept_ready = False
+        self.messages = []
+        self.text = ""
+        self.answer.reset()
+        self.launcher.hide()
+        self.answer.position_near(point)
+        self.answer.show()
+        self.answer.raise_()
+        self.answer.phase.setText("正在本地识别文字…")
+        self.busy = True
+        self.launch_task(
+            lambda cancel, _chunk: (
+                recognize_details(png, (self.session_settings or self.settings).ocr_device)
+                if not cancel.is_set()
+                else ""
+            ),
+            self.ocr_finished,
+            session=True,
+        )
+
+    def ocr_finished(self, text):
+        if isinstance(text, OcrResult):
+            result = text
+            status = f"{result.device} · 识别 {result.seconds:.2f} 秒"
+            if result.fallback:
+                status += "\n" + result.fallback
+            self.answer.ocr_status.setText(status)
+            self.answer.toggle_ocr.setToolTip("查看或修改识别文字\n" + status)
+            text = result.text
+        self.busy = False
+        self.text = text
+        self.answer.source.setPlainText(text)
+        if not text.strip():
+            self.answer.show_error("未识别到文字。请重新框选，或在下方手动输入。")
+            self.answer.source_panel.show()
+            return
+        self.messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": "请解释或解答以下识别文字：\n\n" + text},
+        ]
+        self.request_answer("解释这段内容")
+        # Concept lookup never delays the API request.
+        notes = NoteStore(self.session_settings.notes_dir)
+        generation = self.generation
+
+        def found(card):
+            if generation != self.generation or self.quitting or not card:
+                return
+            self.existing_card = card
+            _, metadata, _ = card
+            count = len(metadata.get("encounters", []))
+            self.answer.encounter.setText(f"你曾遇见「{metadata['name']}」{count} 次")
+            self.answer.encounter.show()
+
+        self.io.submit(lambda: notes.find_concept(text), found, lambda: None)
+
+    def request_answer(self, question):
+        if self.busy:
+            return
+        if not self.session_key:
+            try:
+                if self.session_settings.api_url == self.settings.api_url:
+                    self.session_key = self.store.get_key(self.session_settings.api_url)
+            except Exception:
+                self.fail("无法读取密钥，请打开模型设置。")
+                return
+        self.busy = True
+        self.answer.start_answer(question)
+        client = ChatClient(self.session_settings, self.session_key)
+        messages = [dict(message) for message in self.messages]
+        self.launch_task(
+            lambda cancel, chunk: client.complete(messages, chunk, cancel),
+            self.answer_finished,
+            chunk=self.answer.append_answer,
+            session=True,
+        )
+
+    def answer_finished(self, answer):
+        self.busy = False
+        self.messages.append({"role": "assistant", "content": answer})
+        self.answer.finish_answer(answer)  # Re-enable follow-ups before scheduling disk work.
+        notes = NoteStore(self.session_settings.notes_dir)
+        text = self.text
+        question = self.answer.current_question
+        if question == "解释这段内容":
+            question = text
+        entry_id = uuid.uuid4().hex
+        stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        generation = self.generation
+        session_id = self.qa_session_id
+        settings = self.session_settings
+        self.answer.saved.setText("保存中…")
+
+        def current():
+            return generation == self.generation and not self.quitting
+
+        def saved(path):
+            if current():
+                self.qa_path = path
+                self.answer.saved.setText("已保存")
+                self.answer.saved.setToolTip(str(path))
+
+        def failed():
+            if current():
+                self.answer.saved.setText("保存失败")
+                self.answer.saved.setToolTip("请检查笔记目录权限。回答仍可复制或继续追问。")
+
+        self.io.submit(lambda: notes.append_qa(question, answer, entry_id, stamp), saved, failed)
+        if not self.concept_ready:
+            self.concept_ready = True
+            client = ChatClient(settings, self.session_key)
+
+            def card_ready(card):
+                if self.quitting or not card:
+                    return
+
+                def record():
+                    existing = notes.find_concept(text)
+                    return notes.upsert_concept(card, notes.qa_path, existing, qa_id=session_id)
+
+                def recorded(value):
+                    if current():
+                        path, metadata, _body = value
+                        self.pending_card = path
+                        count = len(metadata.get("encounters", []))
+                        if count > 1:
+                            self.answer.encounter.setText(
+                                f"第 {count} 次遇见「{metadata['name']}」"
+                            )
+                            self.answer.encounter.show()
+
+                self.io.submit(record, recorded, lambda: None)
+
+            if self.existing_card:
+                card_ready({"name": self.existing_card[1]["name"]})
+            else:
+                # A finished answer's card uses a captured context, not the next screenshot.
+                self.launch_task(
+                    lambda cancel, _chunk: client.concept(text, answer, cancel),
+                    card_ready,
+                    lambda _message: None,
+                    session=False,
+                )
+
+    def followup(self, question):
+        if not self.text or self.busy or not self.messages:
+            return
+        # Failed follow-ups must not leave an unanswered message in the conversation.
+        if self.messages[-1]["role"] == "user" and len(self.messages) > 2:
+            self.messages.pop()
+        self.messages.append({"role": "user", "content": question})
+        self.request_answer(question)
+
+    def retry(self, text):
+        if not text:
+            self.answer.show_error("请先填写要解释的文字。")
+            return
+        self.cancel_session()
+        self.concept_ready = False
+        self.pending_card = None
+        self.answer.turns = []
+        self.answer.output = ""
+        self.answer.encounter.hide()
+        # Keep the same Q&A file for retrying, update its content on success.
+        if self.session_settings is None:
+            self.session_settings = self.settings
+        self.ocr_finished(text)
+
+    def fail(self, message):
+        self.busy = False
+        self.answer.show_error(message)
+
+    def maybe_quit(self):
+        if self.quitting and not self.tasks and self.io.pending == 0:
+            self.app.quit()
+
+    def quit(self):
+        if self.quitting:
+            return
+        self.quitting = True
+        self.store.forget_key()
+        self.session_key = ""
+        self.hotkey.stop()
+        for task in self.tasks:
+            task.cancel.set()
+        self.window.hide()
+        self.answer.hide()
+        if self.overlay:
+            self.overlay.close()
+        self.tray.hide()
+        self.launcher.hide()
+        self.io.shutdown()
+        self.maybe_quit()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="屏幕学习助手")
+    parser.add_argument("--preview", action="store_true", help="只预览界面，不注册快捷键")
+    args = parser.parse_args()
+    if sys.platform == "darwin":
+        QApplication.setAttribute(Qt.AA_MacDontSwapCtrlAndMeta, True)
+    app = QApplication(sys.argv[:1])
+    app.setApplicationName("Screen Study Assistant")
+    app.setOrganizationName("ScreenStudyAssistant")
+    app.setQuitOnLastWindowClosed(False)
+    # Prevent duplicate processes from competing for one native shortcut.
+    server = QLocalServer()
+    if not args.preview:
+        socket = QLocalSocket()
+        socket.connectToServer("screen-study-assistant-desktop")
+        if socket.waitForConnected(300):
+            socket.write(b"show")
+            socket.waitForBytesWritten(300)
+            return 0
+        QLocalServer.removeServer("screen-study-assistant-desktop")
+        if not server.listen("screen-study-assistant-desktop"):
+            print("无法启动应用本地实例服务。", file=sys.stderr)
+            return 1
+    controller = Controller(app, preview=args.preview)
+
+    def activate():
+        socket = server.nextPendingConnection()
+        if socket:
+            controller.show_settings()
+            socket.disconnectFromServer()
+            socket.deleteLater()
+
+    server.newConnection.connect(activate)
+    return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
