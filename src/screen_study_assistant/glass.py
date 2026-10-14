@@ -15,6 +15,7 @@ class GlassWindow(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.native_glass = False
         self._effect = None
+        self._frost = None
         self._native_attempted = False
 
     def showEvent(self, event):
@@ -42,6 +43,24 @@ class GlassWindow(QWidget):
                     view.superview().addSubview_positioned_relativeTo_(
                         effect, AppKit.NSWindowBelow, view
                     )
+                    # A lightly blended native blur softens the clear glass
+                    # without replacing it with the opaque regular material.
+                    frost = AppKit.NSVisualEffectView.alloc().initWithFrame_(view.frame())
+                    frost.setMaterial_(AppKit.NSVisualEffectMaterialHUDWindow)
+                    frost.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
+                    frost.setState_(AppKit.NSVisualEffectStateActive)
+                    frost.setAppearance_(
+                        AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameAqua)
+                    )
+                    frost.setAlphaValue_(0.22)
+                    frost.setAutoresizingMask_(18)
+                    frost.setWantsLayer_(True)
+                    frost.layer().setCornerRadius_(28)
+                    frost.layer().setMasksToBounds_(True)
+                    view.superview().addSubview_positioned_relativeTo_(
+                        frost, AppKit.NSWindowBelow, effect
+                    )
+                    self._frost = frost
                 else:
                     effect = AppKit.NSVisualEffectView.alloc().initWithFrame_(view.frame())
                     effect.setMaterial_(AppKit.NSVisualEffectMaterialHUDWindow)
@@ -52,7 +71,7 @@ class GlassWindow(QWidget):
                     AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameAqua)
                 )
                 if hasattr(effect, "setTintColor_"):
-                    effect.setTintColor_(AppKit.NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.04))
+                    effect.setTintColor_(AppKit.NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.06))
                 effect.setAutoresizingMask_(18)  # width + height
                 effect.setWantsLayer_(True)
                 effect.layer().setCornerRadius_(28)
@@ -96,7 +115,7 @@ class GlassWindow(QWidget):
         path = QPainterPath()
         path.addRoundedRect(rect, 28, 28)
         gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        alpha = 48 if self.native_glass else 165
+        alpha = 64 if self.native_glass else 165
         gradient.setColorAt(0, QColor(255, 255, 255, alpha))
         gradient.setColorAt(0.48, QColor(247, 248, 252, alpha))
         gradient.setColorAt(1, QColor(235, 239, 247, alpha))

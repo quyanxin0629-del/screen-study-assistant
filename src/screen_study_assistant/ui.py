@@ -85,6 +85,9 @@ QWidget#answer QTextBrowser { background: transparent; border: none; border-radi
 QWidget#answer QPushButton#choice { background: rgba(255,255,255,65); border: 1px solid rgba(255,255,255,150); border-radius: 16px; padding: 0; }
 QWidget#answer QPushButton#choice:hover { background: rgba(255,255,255,125); border-color: rgba(75,120,220,90); }
 QWidget#answer QPushButton#choice:pressed { background: rgba(225,234,255,150); }
+QWidget#answer QFrame#customChoice { background: rgba(255,255,255,65); border: 1px solid rgba(255,255,255,150); border-radius: 16px; }
+QWidget#answer QFrame#customChoice QLineEdit { background: transparent; border: none; border-radius: 0; padding: 6px 0; }
+QWidget#answer QFrame#customChoice QLineEdit:focus { background: transparent; border: none; }
 QWidget#answer QPushButton#link { color: #677183; }
 QWidget#answer QLabel#muted { color: #687080; }
 QWidget#answer QPlainTextEdit { background: rgba(255,255,255,155); }
@@ -636,7 +639,7 @@ class AnswerWindow(GlassWindow):
         title.setTextFormat(Qt.PlainText)
         title.setStyleSheet("font-size: 17px; font-weight: 600; padding: 0 3px 5px;")
         self.clarification_layout.addWidget(title)
-        hint = label("选一个方向，再继续解答。", "muted", True)
+        hint = label("选一个方向，或直接填写最后一栏。", "muted", True)
         self.clarification_layout.addWidget(hint)
 
         def choice(index, text):
@@ -658,23 +661,30 @@ class AnswerWindow(GlassWindow):
         for index, option in enumerate(options):
             item = choice(index, option)
             item.clicked.connect(lambda _checked=False, text=option: self.clarified.emit(text))
-        other = choice(len(options), "其他，自己填写")
+        self.custom_choice = QFrame()
+        self.custom_choice.setObjectName("customChoice")
+        self.custom_choice.setMinimumHeight(58)
+        custom_row = QHBoxLayout(self.custom_choice)
+        custom_row.setContentsMargins(14, 9, 10, 9)
+        badge = label(chr(65 + len(options)), "muted")
+        badge.setFixedWidth(18)
+        custom_row.addWidget(badge)
         self.custom_direction = QLineEdit()
-        self.custom_direction.setPlaceholderText("输入领域、含义或补充条件，按回车继续")
+        self.custom_direction.setAccessibleName("其他方向，直接填写")
+        self.custom_direction.setPlaceholderText("其他，直接填写 · 回车继续")
+        self.custom_direction.setToolTip("填写领域、含义或补充条件，按回车继续解答")
         self.custom_direction.returnPressed.connect(self.submit_direction)
-        self.custom_direction.hide()
-        self.clarification_layout.addWidget(self.custom_direction)
-        self.custom_confirm = button("继续解答", "primary")
+        custom_row.addWidget(self.custom_direction, 1)
+        self.custom_confirm = button("↑", "icon")
+        self.custom_confirm.setAccessibleName("提交其他方向")
+        self.custom_confirm.setToolTip("继续解答 · 回车")
         self.custom_confirm.clicked.connect(self.submit_direction)
-        self.custom_confirm.hide()
-        self.clarification_layout.addWidget(self.custom_confirm)
-
-        def show_custom():
-            self.custom_direction.show()
-            self.custom_confirm.show()
-            self.custom_direction.setFocus()
-
-        other.clicked.connect(show_custom)
+        self.custom_confirm.setEnabled(False)
+        self.custom_direction.textChanged.connect(
+            lambda text: self.custom_confirm.setEnabled(bool(text.strip()))
+        )
+        custom_row.addWidget(self.custom_confirm)
+        self.clarification_layout.addWidget(self.custom_choice)
         self.clarification_layout.addStretch()
         self.clarification_panel.show()
         self.saved.setText("等待确认")

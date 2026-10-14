@@ -115,6 +115,8 @@ class Controller(QObject):
         self.text = ""
         self.messages = []
         self.pending_clarification = None
+        self.clarification_used = False
+        self.confirmed_direction = ""
         self.session_settings = None
         self.session_key = ""
         self.concept_ready = False
@@ -496,6 +498,8 @@ class Controller(QObject):
         self.concept_ready = False
         self.messages = []
         self.pending_clarification = None
+        self.clarification_used = False
+        self.confirmed_direction = ""
         self.text = ""
         self.answer.reset()
         self.launcher.hide()
@@ -534,6 +538,10 @@ class Controller(QObject):
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": "请解释或解答以下识别文字：\n\n" + text},
         ]
+        if self.confirmed_direction:
+            self.messages.append({
+                "role": "user", "content": "已确认方向：" + self.confirmed_direction,
+            })
         self.request_answer("解释这段内容")
         # Concept lookup never delays the API request.
         notes = NoteStore(self.session_settings.notes_dir)
@@ -564,8 +572,11 @@ class Controller(QObject):
         self.answer.start_answer(question)
         client = ChatClient(self.session_settings, self.session_key)
         messages = [dict(message) for message in self.messages]
+        allow_clarification = not self.clarification_used
         self.launch_task(
-            lambda cancel, chunk: client.study(messages, chunk, cancel),
+            lambda cancel, chunk: client.study(
+                messages, chunk, cancel, allow_clarification=allow_clarification
+            ),
             self.study_finished,
             chunk=self.answer.append_answer,
             session=True,
@@ -574,6 +585,10 @@ class Controller(QObject):
     def study_finished(self, reply: StudyReply):
         self.busy = False
         if reply.action == "clarify":
+            if self.clarification_used:
+                self.fail("已有信息不足以给出可靠解答。你的选择已保留，可修改原文后重试。")
+                return
+            self.clarification_used = True
             self.existing_card = None
             self.answer.encounter.hide()
             self.pending_clarification = reply
@@ -590,6 +605,7 @@ class Controller(QObject):
     def clarify(self, direction):
         if self.busy or not self.pending_clarification or not direction.strip():
             return
+        self.confirmed_direction = direction.strip()
         self.pending_clarification = None
         self.messages.append({
             "role": "user", "content": "我补充确认：" + direction.strip() + "。请结合原文继续。",
