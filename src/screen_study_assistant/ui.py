@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 import uuid
 
-from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
@@ -80,7 +81,10 @@ QWidget#answer QPushButton#primary:disabled { background: #AEC9FA; color: white;
 QWidget#launcher QPushButton { background: rgba(255,255,255,155); }
 QWidget#answer QPushButton#icon { background: rgba(255,255,255,150); }
 QWidget#answer QLineEdit { background: rgba(255,255,255,170); border-color: rgba(255,255,255,220); border-radius: 17px; }
-QWidget#answer QTextBrowser { background: rgba(255,255,255,45); border: none; border-radius: 16px; padding: 8px 4px; }
+QWidget#answer QTextBrowser { background: transparent; border: none; border-radius: 16px; padding: 8px 4px; }
+QWidget#answer QPushButton#choice { background: rgba(255,255,255,65); border: 1px solid rgba(255,255,255,150); border-radius: 16px; padding: 0; }
+QWidget#answer QPushButton#choice:hover { background: rgba(255,255,255,125); border-color: rgba(75,120,220,90); }
+QWidget#answer QPushButton#choice:pressed { background: rgba(225,234,255,150); }
 QWidget#answer QPushButton#link { color: #677183; }
 QWidget#answer QLabel#muted { color: #687080; }
 QWidget#answer QPlainTextEdit { background: rgba(255,255,255,155); }
@@ -431,8 +435,31 @@ class SafeTextBrowser(QTextBrowser):
         self.setDocument(document)
 
 
+class ChoiceButton(QPushButton):
+    """Include wrapped child labels in the button's layout measurement."""
+
+    def __init__(self, text):
+        super().__init__()
+        self.setObjectName("choice")
+        self.setAccessibleName(text)
+        policy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def heightForWidth(self, width):
+        return max(58, self.layout().heightForWidth(width) if self.layout() else 58)
+
+    def sizeHint(self):
+        return QSize(300, self.heightForWidth(300))
+
+    def minimumSizeHint(self):
+        return QSize(100, 58)
+
+
 class AnswerWindow(GlassWindow):
     submitted = Signal(str)
+    clarified = Signal(str)
     retry_requested = Signal(str)
     cancelled = Signal()
     settings_requested = Signal()
@@ -471,12 +498,28 @@ class AnswerWindow(GlassWindow):
         self.encounter.hide()
         layout.addWidget(self.encounter)
         self.browser = SafeTextBrowser()
+        # QTextBrowser's viewport otherwise auto-fills its opaque palette Base.
+        self.browser.viewport().setAutoFillBackground(False)
+        self.browser.viewport().setStyleSheet("background: transparent;")
         self.browser.setOpenExternalLinks(False)
         self.browser.setOpenLinks(False)
         self.browser.document().setDefaultStyleSheet(
             "body {line-height:1.6;} h2,h3 {font-size:15px;} p {margin-top:6px;margin-bottom:9px;} code {background:#f0f3f8;}"
         )
         layout.addWidget(self.browser, 1)
+        self.clarification_panel = QScrollArea()
+        self.clarification_panel.setWidgetResizable(True)
+        self.clarification_panel.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.clarification_panel.viewport().setAutoFillBackground(False)
+        self.clarification_body = QWidget()
+        self.clarification_layout = QVBoxLayout(self.clarification_body)
+        self.clarification_layout.setContentsMargins(0, 5, 0, 5)
+        self.clarification_layout.setSpacing(10)
+        self.clarification_panel.setWidget(self.clarification_body)
+        self.clarification_panel.hide()
+        layout.addWidget(self.clarification_panel, 1)
+        self.choice_buttons = []
+        self.clarification_active = False
         self.toggle_ocr = button("原文", "link")
         self.toggle_ocr.setToolTip("查看或修改本地识别文字")
         self.toggle_ocr.clicked.connect(self.toggle_source)
@@ -536,6 +579,7 @@ class AnswerWindow(GlassWindow):
         self.move(adjacent_position(selection, self.size(), area))
 
     def reset(self):
+        self.clear_clarification()
         self.turns = []
         self.current_question = ""
         self.output = ""
@@ -558,12 +602,87 @@ class AnswerWindow(GlassWindow):
         self.stop.setVisible(value)
 
     def start_answer(self, question):
+        self.clear_clarification()
         self.current_question = question
         self.output = ""
         self.phase.setText("正在解答…")
         self.phase.show()
         self.phase.setStyleSheet("")
         self.busy(True)
+
+    def clear_clarification(self):
+        self.clarification_active = False
+        self.clarification_panel.hide()
+        self.browser.show()
+        self.question.show()
+        self.send.show()
+        self.copy.setEnabled(True)
+        while self.clarification_layout.count():
+            item = self.clarification_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.choice_buttons = []
+
+    def show_clarification(self, prompt, options):
+        self.clear_clarification()
+        self.clarification_active = True
+        self.browser.hide()
+        self.question.hide()
+        self.send.hide()
+        self.stop.hide()
+        self.phase.hide()
+        self.copy.setEnabled(bool(self.turns))
+        title = label(prompt, wrap=True)
+        title.setTextFormat(Qt.PlainText)
+        title.setStyleSheet("font-size: 17px; font-weight: 600; padding: 0 3px 5px;")
+        self.clarification_layout.addWidget(title)
+        hint = label("选一个方向，再继续解答。", "muted", True)
+        self.clarification_layout.addWidget(hint)
+
+        def choice(index, text):
+            item = ChoiceButton(f"{chr(65 + index)} {text}")
+            row = QHBoxLayout(item)
+            row.setContentsMargins(14, 13, 14, 13)
+            badge = label(chr(65 + index), "muted")
+            badge.setFixedWidth(18)
+            content = label(text, wrap=True)
+            content.setTextFormat(Qt.PlainText)
+            for widget in (badge, content):
+                widget.setAttribute(Qt.WA_TransparentForMouseEvents)
+                row.addWidget(widget)
+            row.setStretch(1, 1)
+            self.clarification_layout.addWidget(item)
+            self.choice_buttons.append(item)
+            return item
+
+        for index, option in enumerate(options):
+            item = choice(index, option)
+            item.clicked.connect(lambda _checked=False, text=option: self.clarified.emit(text))
+        other = choice(len(options), "其他，自己填写")
+        self.custom_direction = QLineEdit()
+        self.custom_direction.setPlaceholderText("输入领域、含义或补充条件，按回车继续")
+        self.custom_direction.returnPressed.connect(self.submit_direction)
+        self.custom_direction.hide()
+        self.clarification_layout.addWidget(self.custom_direction)
+        self.custom_confirm = button("继续解答", "primary")
+        self.custom_confirm.clicked.connect(self.submit_direction)
+        self.custom_confirm.hide()
+        self.clarification_layout.addWidget(self.custom_confirm)
+
+        def show_custom():
+            self.custom_direction.show()
+            self.custom_confirm.show()
+            self.custom_direction.setFocus()
+
+        other.clicked.connect(show_custom)
+        self.clarification_layout.addStretch()
+        self.clarification_panel.show()
+        self.saved.setText("等待确认")
+
+    def submit_direction(self):
+        text = self.custom_direction.text().strip()
+        if self.clarification_active and text:
+            self.clarified.emit(text)
 
     def append_answer(self, text):
         self.output += text

@@ -14,7 +14,7 @@ from PySide6.QtGui import QAction, QCursor, QIcon, QKeySequence
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QFileDialog, QMenu, QMenuBar, QSystemTrayIcon
 
-from .api import SYSTEM_PROMPT, Cancelled, ChatClient
+from .api import SYSTEM_PROMPT, Cancelled, ChatClient, StudyReply
 from .config import ConfigStore, Settings, normalize_url
 from .hotkey import Hotkey
 from .notes import NoteStore
@@ -114,6 +114,7 @@ class Controller(QObject):
         self.qa_path = None
         self.text = ""
         self.messages = []
+        self.pending_clarification = None
         self.session_settings = None
         self.session_key = ""
         self.concept_ready = False
@@ -143,6 +144,7 @@ class Controller(QObject):
         self.window.url.textChanged.connect(self.url_changed)
         self.window.shortcut.recording_changed.connect(self.record_shortcut)
         self.answer.submitted.connect(self.followup)
+        self.answer.clarified.connect(self.clarify)
         self.answer.retry_requested.connect(self.retry)
         self.answer.cancelled.connect(self.cancel_session)
         self.answer.settings_requested.connect(self.show_settings)
@@ -412,6 +414,7 @@ class Controller(QObject):
         for task in self.session_tasks:
             task.cancel.set()
         self.busy = False
+        self.pending_clarification = None
         self.session_key = ""
         self.answer.busy(False)
         if self.answer.isVisible():
@@ -492,6 +495,7 @@ class Controller(QObject):
         self.existing_card = None
         self.concept_ready = False
         self.messages = []
+        self.pending_clarification = None
         self.text = ""
         self.answer.reset()
         self.launcher.hide()
@@ -561,21 +565,43 @@ class Controller(QObject):
         client = ChatClient(self.session_settings, self.session_key)
         messages = [dict(message) for message in self.messages]
         self.launch_task(
-            lambda cancel, chunk: client.complete(messages, chunk, cancel),
-            self.answer_finished,
+            lambda cancel, chunk: client.study(messages, chunk, cancel),
+            self.study_finished,
             chunk=self.answer.append_answer,
             session=True,
         )
+
+    def study_finished(self, reply: StudyReply):
+        self.busy = False
+        if reply.action == "clarify":
+            self.existing_card = None
+            self.answer.encounter.hide()
+            self.pending_clarification = reply
+            self.messages.append({
+                "role": "assistant",
+                "content": reply.prompt + "\n" + "\n".join(reply.options),
+            })
+            self.answer.show_clarification(reply.prompt, reply.options)
+            return
+        self.pending_clarification = None
+        self.answer.current_question = reply.question
+        self.answer_finished(reply.answer)
+
+    def clarify(self, direction):
+        if self.busy or not self.pending_clarification or not direction.strip():
+            return
+        self.pending_clarification = None
+        self.messages.append({
+            "role": "user", "content": "我补充确认：" + direction.strip() + "。请结合原文继续。",
+        })
+        self.request_answer("解释这段内容")
 
     def answer_finished(self, answer):
         self.busy = False
         self.messages.append({"role": "assistant", "content": answer})
         self.answer.finish_answer(answer)  # Re-enable follow-ups before scheduling disk work.
         notes = NoteStore(self.session_settings.notes_dir)
-        text = self.text
         question = self.answer.current_question
-        if question == "解释这段内容":
-            question = text
         entry_id = uuid.uuid4().hex
         stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
         generation = self.generation
@@ -607,7 +633,7 @@ class Controller(QObject):
                     return
 
                 def record():
-                    existing = notes.find_concept(text)
+                    existing = notes.find_concept(card["name"])
                     return notes.upsert_concept(card, notes.qa_path, existing, qa_id=session_id)
 
                 def recorded(value):
@@ -623,19 +649,17 @@ class Controller(QObject):
 
                 self.io.submit(record, recorded, lambda: None)
 
-            if self.existing_card:
-                card_ready({"name": self.existing_card[1]["name"]})
-            else:
-                # A finished answer's card uses a captured context, not the next screenshot.
-                self.launch_task(
-                    lambda cancel, _chunk: client.concept(text, answer, cancel),
-                    card_ready,
-                    lambda _message: None,
-                    session=False,
-                )
+            # Use the confirmed question so ambiguous abbreviations cannot merge
+            # unrelated domains just because their OCR spelling was identical.
+            self.launch_task(
+                lambda cancel, _chunk: client.concept(question, answer, cancel),
+                card_ready,
+                lambda _message: None,
+                session=False,
+            )
 
     def followup(self, question):
-        if not self.text or self.busy or not self.messages:
+        if not self.text or self.busy or not self.messages or self.pending_clarification:
             return
         # Failed follow-ups must not leave an unanswered message in the conversation.
         if self.messages[-1]["role"] == "user" and len(self.messages) > 2:

@@ -35,7 +35,7 @@ class GlassWindow(QWidget):
                 window = view.window()
                 if hasattr(AppKit, "NSGlassEffectView"):
                     effect = AppKit.NSGlassEffectView.alloc().initWithFrame_(view.frame())
-                    effect.setStyle_(0)  # regular glass keeps text readable
+                    effect.setStyle_(AppKit.NSGlassEffectViewStyleClear)
                     effect.setCornerRadius_(28)
                     # Preserve Qt's content view and accessibility hierarchy.
                     effect.setContentView_(AppKit.NSView.alloc().initWithFrame_(effect.bounds()))
@@ -44,7 +44,7 @@ class GlassWindow(QWidget):
                     )
                 else:
                     effect = AppKit.NSVisualEffectView.alloc().initWithFrame_(view.frame())
-                    effect.setMaterial_(AppKit.NSVisualEffectMaterialPopover)
+                    effect.setMaterial_(AppKit.NSVisualEffectMaterialHUDWindow)
                     effect.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
                     effect.setState_(AppKit.NSVisualEffectStateActive)
                     view.addSubview_positioned_relativeTo_(effect, AppKit.NSWindowBelow, None)
@@ -52,7 +52,7 @@ class GlassWindow(QWidget):
                     AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameAqua)
                 )
                 if hasattr(effect, "setTintColor_"):
-                    effect.setTintColor_(AppKit.NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.12))
+                    effect.setTintColor_(AppKit.NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.04))
                 effect.setAutoresizingMask_(18)  # width + height
                 effect.setWantsLayer_(True)
                 effect.layer().setCornerRadius_(28)
@@ -96,7 +96,7 @@ class GlassWindow(QWidget):
         path = QPainterPath()
         path.addRoundedRect(rect, 28, 28)
         gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        alpha = 145 if self.native_glass else 225
+        alpha = 48 if self.native_glass else 165
         gradient.setColorAt(0, QColor(255, 255, 255, alpha))
         gradient.setColorAt(0.48, QColor(247, 248, 252, alpha))
         gradient.setColorAt(1, QColor(235, 239, 247, alpha))
