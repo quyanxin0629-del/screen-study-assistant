@@ -422,7 +422,7 @@ class Controller(QObject):
         self.busy = False
         self.pending_clarification = None
         self.session_key = ""
-        self.answer.busy(False)
+        self.answer.interrupt_answer()
         if self.answer.isVisible():
             self.answer.phase.setText("已停止 · 可修改识别文字后重新解答")
 
@@ -570,6 +570,9 @@ class Controller(QObject):
     def request_answer(self, question):
         if self.busy:
             return
+        self.busy = True
+        # Display the sent question before credentials or any model work.
+        self.answer.start_answer(question)
         if not self.session_key:
             try:
                 if self.session_settings.api_url == self.settings.api_url:
@@ -577,8 +580,6 @@ class Controller(QObject):
             except Exception:
                 self.fail("无法读取密钥，请打开模型设置。")
                 return
-        self.busy = True
-        self.answer.start_answer(question)
         client = ChatClient(self.session_settings, self.session_key)
         messages = [dict(message) for message in self.messages]
         allow_clarification = not self.clarification_used
@@ -762,7 +763,7 @@ class Controller(QObject):
         self.cancel_session()
         self.concept_ready = False
         self.pending_card = None
-        self.answer.turns = []
+        self.answer.clear_conversation()
         self.note_turns = []  # corrected OCR replaces this capture, retaining its ID/revision
         self.answer.output = ""
         self.answer.encounter.hide()

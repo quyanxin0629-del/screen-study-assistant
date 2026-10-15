@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import sys
 import uuid
+from math import ceil
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -91,6 +92,15 @@ QWidget#answer QFrame#customChoice QLineEdit:focus { background: transparent; bo
 QWidget#answer QPushButton#link { color: #677183; }
 QWidget#answer QLabel#muted { color: #687080; }
 QWidget#answer QPlainTextEdit { background: rgba(255,255,255,155); }
+QWidget#answer QFrame#userBubble {
+    background: rgba(177,221,204,220); border: 1px solid rgba(111,168,147,110);
+    border-radius: 16px;
+}
+QWidget#answer QFrame#assistantBubble {
+    background: rgba(248,250,255,190); border: 1px solid rgba(148,164,190,70);
+    border-radius: 16px;
+}
+QWidget#answer QLabel#chatStatus { color: #687789; font-size: 12px; }
 QComboBox { padding: 8px 12px; background: #F0F3FA; border: 1px solid #E3E7F1; border-radius: 10px; }
 QFrame#answerHeader { background: transparent; border: none; }
 QTextBrowser { background: white; border: 1px solid #E9EDF4; border-radius: 14px; padding: 14px; font-size: 14px; }
@@ -430,9 +440,11 @@ class SafeDocument(QTextDocument):
 
 
 class SafeTextBrowser(QTextBrowser):
-    def __init__(self):
+    def __init__(self, math_renderer=None):
         super().__init__()
-        self.math_renderer = MathRenderer()
+        self.math_renderer = math_renderer if math_renderer is not None else MathRenderer()
+        self.setOpenExternalLinks(False)
+        self.setOpenLinks(False)
 
     def loadResource(self, _type, _name):
         return None
@@ -492,6 +504,165 @@ class SafeTextBrowser(QTextBrowser):
             cursor.setBlockFormat(fmt)
             block = block.next()
         self.setDocument(document)
+
+
+class ChatBubble(QFrame):
+    def __init__(self, role, renderer):
+        super().__init__()
+        self.role = role
+        self.text = None
+        self.setObjectName("userBubble" if role == "user" else "assistantBubble")
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.box = QVBoxLayout(self)
+        self.box.setContentsMargins(12, 10, 12, 10)
+        self.box.setSpacing(6)
+        if role == "user":
+            self.body = label("", wrap=True)
+            self.body.setTextFormat(Qt.PlainText)
+            self.body.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        else:
+            self.body = SafeTextBrowser(renderer)
+            self.body.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.body.viewport().setAutoFillBackground(False)
+            self.body.setStyleSheet("QTextBrowser {background: transparent; border: none; padding: 0;}")
+            self.body.document().setDefaultStyleSheet(
+                "h1,h2,h3,h4 {font-size:14px;} code {background:#edf1f7;}"
+            )
+        self.box.addWidget(self.body)
+        self.status = label("", "chatStatus", True)
+        self.box.addWidget(self.status)
+        self.status.hide()
+
+    def set_message(self, text, status):
+        if text != self.text:
+            self.text = text
+            if self.role == "user":
+                self.body.setText(text)
+            elif text:
+                self.body.set_answer_markdown(text)
+        self.body.setVisible(bool(text))
+        self.status.setText(status)
+        self.status.setVisible(bool(status))
+        self.status.setStyleSheet("color: #B64C4C;" if status and status != "正在思考…" else "")
+
+    def fit_width(self, available):
+        limit = max(80, int(available * (0.82 if self.role == "user" else 0.92)))
+        if self.role == "user":
+            longest = max((self.body.fontMetrics().horizontalAdvance(line)
+                           for line in (self.text or "").splitlines()), default=50)
+            width = min(limit, max(70, longest + 28))
+        else:
+            width = limit if self.text else min(limit, 130)
+        self.setFixedWidth(width)
+        inner = max(30, width - 24)
+        self.body.setFixedWidth(inner)
+        if self.role == "user":
+            height = self.body.heightForWidth(inner)
+        else:
+            self.body.document().setTextWidth(max(20, inner - 4))
+            height = ceil(self.body.document().size().height()) + 5
+            if self.body.horizontalScrollBar().maximum():
+                height += self.body.horizontalScrollBar().sizeHint().height()
+        self.body.setFixedHeight(max(20, height))
+        self.status.setFixedWidth(inner)
+        self.status.setFixedHeight(max(20, self.status.heightForWidth(inner)))
+        self.box.invalidate()
+        self.setFixedHeight(self.box.sizeHint().height())
+
+
+class ConversationView(QScrollArea):
+    """Independent message bubbles; only the current answer is re-rendered."""
+
+    def __init__(self):
+        super().__init__()
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.viewport().setAutoFillBackground(False)
+        self.content = QWidget()
+        self.items = QVBoxLayout(self.content)
+        self.items.setContentsMargins(0, 3, 3, 6)
+        self.items.setSpacing(12)
+        self.items.setAlignment(Qt.AlignTop)
+        self.setWidget(self.content)
+        self.content.setAutoFillBackground(False)
+        self.renderer = MathRenderer()
+        self.bubbles = []
+        self.rows = []
+        self._follow_end = True
+        self.scroll_timer = QTimer(self)
+        self.scroll_timer.setSingleShot(True)
+        self.scroll_timer.timeout.connect(self._scroll_bottom)
+        self.verticalScrollBar().rangeChanged.connect(self._range_changed)
+        self.verticalScrollBar().valueChanged.connect(self._scroll_changed)
+
+    def clear(self):
+        while self.items.count():
+            item = self.items.takeAt(0)
+            item.widget().deleteLater()
+        self.bubbles.clear()
+        self.rows.clear()
+        self.content.setMinimumHeight(0)
+        self.scroll_timer.stop()
+        self._follow_end = True
+
+    def set_messages(self, messages, force_scroll=False):
+        bar = self.verticalScrollBar()
+        follow = force_scroll or bar.value() >= bar.maximum() - 24
+        self._follow_end = follow
+        while len(self.bubbles) > len(messages):
+            row = self.rows.pop()
+            self.bubbles.pop()
+            self.items.removeWidget(row)
+            row.deleteLater()
+        for index, message in enumerate(messages):
+            if index == len(self.bubbles):
+                row = QWidget()
+                row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                line = QHBoxLayout(row)
+                line.setContentsMargins(0, 0, 0, 0)
+                bubble = ChatBubble(message["role"], self.renderer)
+                if message["role"] == "user":
+                    line.addStretch()
+                line.addWidget(bubble)
+                if message["role"] != "user":
+                    line.addStretch()
+                self.items.addWidget(row)
+                self.rows.append(row)
+                self.bubbles.append(bubble)
+            self.bubbles[index].set_message(message["text"], message.get("status", ""))
+        self._fit_messages()
+        if follow:
+            self.scroll_timer.start(0)
+
+    def _range_changed(self, _minimum, _maximum):
+        if self._follow_end:
+            self.scroll_timer.start(0)
+
+    def _scroll_changed(self, value):
+        self._follow_end = value >= self.verticalScrollBar().maximum() - 24
+
+    def _scroll_bottom(self):
+        if self._follow_end:
+            bar = self.verticalScrollBar()
+            bar.setValue(bar.maximum())
+
+    def _fit_messages(self):
+        available = max(100, self.viewport().width() - 6)
+        for row, bubble in zip(self.rows, self.bubbles):
+            bubble.fit_width(available)
+            row.setFixedHeight(bubble.height())
+        self.items.invalidate()
+        self.content.setMinimumHeight(self.items.sizeHint().height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_messages()
+
+    def toPlainText(self):
+        return "\n\n".join(
+            bubble.body.text() if bubble.role == "user" else bubble.body.toPlainText()
+            for bubble in self.bubbles if bubble.text
+        )
 
 
 class ChoiceButton(QPushButton):
@@ -556,15 +727,7 @@ class AnswerWindow(GlassWindow):
         self.encounter = label("", "muted", True)
         self.encounter.hide()
         layout.addWidget(self.encounter)
-        self.browser = SafeTextBrowser()
-        # QTextBrowser's viewport otherwise auto-fills its opaque palette Base.
-        self.browser.viewport().setAutoFillBackground(False)
-        self.browser.viewport().setStyleSheet("background: transparent;")
-        self.browser.setOpenExternalLinks(False)
-        self.browser.setOpenLinks(False)
-        self.browser.document().setDefaultStyleSheet(
-            "body {line-height:1.6;} h2,h3 {font-size:15px;} p {margin-top:6px;margin-bottom:9px;} code {background:#f0f3f8;}"
-        )
+        self.browser = ConversationView()
         layout.addWidget(self.browser, 1)
         self.clarification_panel = QScrollArea()
         self.clarification_panel.setWidgetResizable(True)
@@ -628,6 +791,11 @@ class AnswerWindow(GlassWindow):
         self.turns = []
         self.current_question = ""
         self.output = ""
+        self.chat_history = []
+        self.pending = False
+        self.display_question = ""
+        self.reply_status = ""
+        self.clarifying_question = ""
 
     def position_near(self, selection):
         if isinstance(selection, QPoint):
@@ -639,11 +807,7 @@ class AnswerWindow(GlassWindow):
 
     def reset(self):
         self.clear_clarification()
-        self.turns = []
-        self.current_question = ""
-        self.output = ""
-        self.rendered = ""
-        self.browser.clear()
+        self.clear_conversation()
         self.source.clear()
         self.ocr_status.clear()
         self.ocr_status.hide()
@@ -655,19 +819,40 @@ class AnswerWindow(GlassWindow):
         self.phase.setStyleSheet("")
         self.busy(True)
 
+    def clear_conversation(self):
+        self.turns = []
+        self.chat_history = []
+        self.current_question = ""
+        self.display_question = ""
+        self.pending = False
+        self.reply_status = ""
+        self.clarifying_question = ""
+        self.output = ""
+        self.rendered = ""
+        self.browser.clear()
+
     def busy(self, value):
         self.question.setEnabled(not value)
         self.send.setEnabled(not value)
         self.stop.setVisible(value)
 
     def start_answer(self, question):
+        if self.pending:
+            self.chat_history.append({"question": self.display_question, "answer": self.output,
+                                      "status": self.reply_status if self.reply_status != "正在思考…"
+                                      else "已停止"})
+        display = self.clarifying_question or question
+        self.clarifying_question = ""
         self.clear_clarification()
         self.current_question = question
+        self.display_question = display
+        self.pending = True
+        self.reply_status = "正在思考…"
         self.output = ""
-        self.phase.setText("正在解答…")
-        self.phase.show()
+        self.phase.hide()
         self.phase.setStyleSheet("")
         self.busy(True)
+        self.render(force_scroll=True)
 
     def clear_clarification(self):
         self.clarification_active = False
@@ -683,6 +868,9 @@ class AnswerWindow(GlassWindow):
         self.choice_buttons = []
 
     def show_clarification(self, prompt, options):
+        self.clarifying_question = self.display_question
+        self.pending = False
+        self.output = ""
         self.clear_clarification()
         self.clarification_active = True
         self.browser.hide()
@@ -752,31 +940,37 @@ class AnswerWindow(GlassWindow):
 
     def append_answer(self, text):
         self.output += text
+        self.reply_status = ""
         self.phase.hide()
         self.render()
 
-    def render(self):
-        sections = []
-        for turn in self.turns:
+    def render(self, force_scroll=False):
+        sections, messages = [], []
+        history = list(self.chat_history)
+        if self.pending:
+            history.append({"question": self.display_question, "answer": self.output,
+                            "status": self.reply_status})
+        for turn in history:
             heading = (
                 ""
                 if turn["question"] == "解释这段内容"
                 else format_question(turn["question"]) + "\n\n"
             )
             sections.append(heading + turn["answer"])
-        if self.output:
-            heading = (
-                ""
-                if self.current_question == "解释这段内容"
-                else format_question(self.current_question) + "\n\n"
-            )
-            sections.append(heading + self.output)
+            messages.extend((
+                {"role": "user", "text": turn["question"]},
+                {"role": "assistant", "text": turn["answer"], "status": turn.get("status", "")},
+            ))
         self.rendered = "\n\n---\n\n".join(sections)
-        self.browser.set_answer_markdown(self.rendered)
-        self.browser.verticalScrollBar().setValue(self.browser.verticalScrollBar().maximum())
+        self.browser.set_messages(messages, force_scroll=force_scroll)
 
     def finish_answer(self, answer):
         self.turns.append({"question": self.current_question, "answer": answer})
+        display = self.display_question or self.current_question
+        if display == "解释这段内容":
+            display = self.current_question
+        self.chat_history.append({"question": display, "answer": answer})
+        self.pending = False
         self.output = ""
         self.render()
         self.phase.clear()
@@ -784,9 +978,18 @@ class AnswerWindow(GlassWindow):
         self.busy(False)
 
     def show_error(self, text):
+        if self.pending:
+            self.reply_status = text
+            self.render()
         self.phase.setText(text)
         self.phase.show()
         self.phase.setStyleSheet("color: #D65C5C;")
+        self.busy(False)
+
+    def interrupt_answer(self):
+        if self.pending:
+            self.reply_status = "已停止"
+            self.render()
         self.busy(False)
 
     def toggle_source(self):
