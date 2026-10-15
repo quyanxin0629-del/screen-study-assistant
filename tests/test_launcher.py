@@ -22,7 +22,7 @@ def test_capsule_unfolds_without_triggering_actions_and_keeps_existing_labels():
         assert not window.expanded and not window.capture_button.isVisible()
         assert window.width() == window.COMPACT_WIDTH
         QTest.mouseClick(window, Qt.LeftButton)
-        QTest.qWait(300)
+        QTest.qWait(window.MORPH_MS + 60)
         assert window.expanded and window.capture_button.isVisible()
         assert window.width() == window.EXPANDED_WIDTH
         assert window._area().contains(window.geometry())
@@ -33,10 +33,10 @@ def test_capsule_unfolds_without_triggering_actions_and_keeps_existing_labels():
             QTest.mouseClick(item, Qt.LeftButton)
         assert calls == ["capture", "settings", "notes"]
         QTest.keyClick(window, Qt.Key_Escape)
-        QTest.qWait(300)
+        QTest.qWait(window.MORPH_MS + 60)
         assert not window.expanded and not window._actions.isVisible()
         QTest.keyClick(window, Qt.Key_Space)
-        QTest.qWait(300)
+        QTest.qWait(window.MORPH_MS + 60)
         assert window.expanded and window.settings_button.isVisible()
     finally:
         window.hide()
@@ -83,6 +83,98 @@ def test_capsule_expansion_and_fold_remain_inside_a_negative_coordinate_monitor(
             window.set_expanded(False, animate=False)
             assert area.contains(window.geometry())
             assert window.glass_corner_radius() == window.COMPACT_WIDTH / 2
+    finally:
+        window.hide()
+        window.deleteLater()
+
+
+def test_drag_unfolds_while_following_the_hand_without_restarting_or_firing_actions():
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    app = QApplication.instance() or QApplication([])
+    window = LauncherWindow()
+    calls = []
+    window.capture_requested.connect(lambda: calls.append("capture"))
+    window.show()
+    app.processEvents()
+    try:
+        QTest.mousePress(window, Qt.LeftButton, pos=window.rect().center())
+        origin = QPoint(window._drag_origin)
+
+        def move_to(delta):
+            target = origin + delta
+            event = QMouseEvent(QEvent.MouseMove, QPointF(window.mapFromGlobal(target)),
+                                QPointF(target), Qt.NoButton, Qt.LeftButton, Qt.NoModifier)
+            app.sendEvent(window, event)
+
+        move_to(QPoint(-90, -35))
+        assert window.expanded and window._dragged
+        QTest.qWait(130)
+        progress = window.unfold
+        assert 0 < progress < 1 and window.COMPACT_WIDTH < window.width() < window.EXPANDED_WIDTH
+        assert not window.capture_button.isEnabled()
+        move_to(QPoint(-130, -60))
+        QTest.qWait(70)
+        assert window.unfold > progress  # dragging must not repeatedly restart the morph
+        assert not calls
+        target = origin + QPoint(-130, -60)
+        app.sendEvent(window, QMouseEvent(QEvent.MouseButtonRelease,
+                      QPointF(window.mapFromGlobal(target)), QPointF(target),
+                      Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+        QTest.qWait(window.MORPH_MS + 60)
+        assert window.expanded and window.width() == window.EXPANDED_WIDTH
+        assert window.height() == window.HEIGHT and window.capture_button.isEnabled()
+        assert window._area().contains(window.geometry()) and not calls
+    finally:
+        window.hide()
+        window.deleteLater()
+
+
+def test_hover_does_not_steal_the_click_transition_and_idle_uses_desktop_pointer(monkeypatch):
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QEnterEvent
+
+    app = QApplication.instance() or QApplication([])
+    window = LauncherWindow()
+    window.show()
+    app.processEvents()
+    try:
+        app.sendEvent(window, QEnterEvent(QPointF(10, 10), QPointF(10, 10), QPointF(10, 10)))
+        QTest.qWait(80)
+        assert not window.expanded and window.width() == window.COMPACT_WIDTH
+        QTest.mouseClick(window, Qt.LeftButton)
+        QTest.qWait(90)
+        assert window.COMPACT_WIDTH < window.width() < window.EXPANDED_WIDTH
+        QTest.qWait(window.MORPH_MS + 60)
+        monkeypatch.setattr("screen_study_assistant.launcher.QCursor.pos",
+                            lambda: window.geometry().center())
+        window._collapse_if_idle()
+        assert window.expanded
+        monkeypatch.setattr("screen_study_assistant.launcher.QCursor.pos", lambda: QPoint(-9999, -9999))
+        # A stale QWidget hover bit must not keep the glass expanded forever.
+        monkeypatch.setattr(window, "underMouse", lambda: True)
+        window._collapse_if_idle()
+        QTest.qWait(window.MORPH_MS + 60)
+        assert not window.expanded and window.width() == window.COMPACT_WIDTH
+    finally:
+        window.hide()
+        window.deleteLater()
+
+
+def test_hiding_a_pressed_particle_resets_its_compression_and_input_state():
+    app = QApplication.instance() or QApplication([])
+    window = LauncherWindow()
+    window.show()
+    app.processEvents()
+    try:
+        QTest.mousePress(window, Qt.LeftButton)
+        QTest.qWait(180)
+        assert window.height() < window.COMPACT_HEIGHT
+        window.hide()
+        assert window._drag_origin is None and window.pressure == 0
+        assert window.width() == window.COMPACT_WIDTH and window.height() == window.COMPACT_HEIGHT
+        assert not window._glow_timer.isActive()
     finally:
         window.hide()
         window.deleteLater()
