@@ -1,5 +1,7 @@
 import os
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QRect, Qt
@@ -7,6 +9,17 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from screen_study_assistant.launcher import LauncherWindow
+
+
+@pytest.fixture(autouse=True)
+def keep_synthetic_mouse_in_active_window(monkeypatch):
+    # QTest mouse events do not move the real desktop pointer. Keep its fallback
+    # consistent with the gesture unless a test explicitly simulates leaving.
+    def position():
+        window = QApplication.activeWindow()
+        return window.geometry().center() if window else QPoint(-9999, -9999)
+
+    monkeypatch.setattr("screen_study_assistant.launcher.QCursor.pos", position)
 
 
 def test_capsule_unfolds_without_triggering_actions_and_keeps_existing_labels():
@@ -33,7 +46,7 @@ def test_capsule_unfolds_without_triggering_actions_and_keeps_existing_labels():
             QTest.mouseClick(item, Qt.LeftButton)
         assert calls == ["capture", "settings", "notes"]
         QTest.keyClick(window, Qt.Key_Escape)
-        QTest.qWait(window.MORPH_MS + 60)
+        QTest.qWait(window.COLLAPSE_MS + 60)
         assert not window.expanded and not window._actions.isVisible()
         QTest.keyClick(window, Qt.Key_Space)
         QTest.qWait(window.MORPH_MS + 60)
@@ -82,7 +95,7 @@ def test_capsule_expansion_and_fold_remain_inside_a_negative_coordinate_monitor(
             assert window.glass_corner_radius() == window.HEIGHT / 2
             window.set_expanded(False, animate=False)
             assert area.contains(window.geometry())
-            assert window.glass_corner_radius() == window.COMPACT_WIDTH / 2
+            assert window.glass_corner_radius() == window.COMPACT_RADIUS
     finally:
         window.hide()
         window.deleteLater()
@@ -153,7 +166,7 @@ def test_hover_unfolds_without_a_click_and_idle_uses_desktop_pointer(monkeypatch
         # A stale QWidget hover bit must not keep the glass expanded forever.
         monkeypatch.setattr(window, "underMouse", lambda: True)
         window._collapse_if_idle()
-        QTest.qWait(window.MORPH_MS + 60)
+        QTest.qWait(window.COLLAPSE_MS + 60)
         assert not window.expanded and window.width() == window.COMPACT_WIDTH
     finally:
         window.hide()
@@ -279,7 +292,7 @@ def test_pointer_hover_fallback_opens_and_labels_without_native_enter_events(mon
         QTest.qWait(200)
         assert action.hover > .99 and window.capture_button.hover == 0
         QTest.keyClick(window, Qt.Key_Escape)
-        QTest.qWait(window.MORPH_MS + 60)
+        QTest.qWait(window.COLLAPSE_MS + 60)
         monkeypatch.setattr("screen_study_assistant.launcher.QCursor.pos",
                             lambda: window.mapToGlobal(window.rect().center()))
         window._sync_pointer_hover()
@@ -290,6 +303,85 @@ def test_pointer_hover_fallback_opens_and_labels_without_native_enter_events(mon
                             lambda: window.mapToGlobal(window.rect().center()))
         window._sync_pointer_hover()
         assert window.expanded
+    finally:
+        window.hide()
+        window.deleteLater()
+
+
+def test_leaving_folds_promptly_without_restarting_the_deadline(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = LauncherWindow()
+    window.show()
+    app.processEvents()
+    try:
+        window.set_expanded(True, animate=False)
+        window._sync_pointer_hover()
+        monkeypatch.setattr("screen_study_assistant.launcher.QCursor.pos", lambda: QPoint(-9999, -9999))
+        window._sync_pointer_hover()
+        assert window._collapse_timer.isActive()
+        for _ in range(5):
+            QTest.qWait(50)
+            window._sync_pointer_hover()
+        assert not window.expanded  # repeated polling must not extend the 180 ms delay
+        QTest.qWait(window.COLLAPSE_MS + 60)
+        assert window.width() == window.COMPACT_WIDTH
+        assert window.height() == window.COMPACT_HEIGHT
+        assert window.width() == window.height()
+        assert window.glass_corner_radius() == window.width() / 2
+    finally:
+        window.hide()
+        window.deleteLater()
+
+
+def test_reenter_cancels_fold_and_pointer_takes_over_keyboard_open(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = LauncherWindow()
+    window.show()
+    app.processEvents()
+    try:
+        QTest.keyClick(window, Qt.Key_Space)
+        QTest.qWait(window.MORPH_MS + 60)
+        assert window._keyboard_open
+        window._sync_pointer_hover()
+        assert not window._keyboard_open
+        monkeypatch.setattr("screen_study_assistant.launcher.QCursor.pos", lambda: QPoint(-9999, -9999))
+        window._sync_pointer_hover()
+        assert window._collapse_timer.isActive()
+        monkeypatch.setattr("screen_study_assistant.launcher.QCursor.pos", lambda: window.geometry().center())
+        window._sync_pointer_hover()
+        assert not window._collapse_timer.isActive()
+        QTest.qWait(window.LEAVE_DELAY_MS + 60)
+        assert window.expanded
+        # Transparent rounded corners do not count as remaining over the glass.
+        monkeypatch.setattr("screen_study_assistant.launcher.QCursor.pos", lambda: window.geometry().topLeft())
+        window._sync_pointer_hover()
+        QTest.qWait(window.LEAVE_DELAY_MS + window.COLLAPSE_MS + 60)
+        assert not window.expanded and window.width() == window.COMPACT_WIDTH
+    finally:
+        window.hide()
+        window.deleteLater()
+
+
+def test_fold_remains_in_motion_after_old_cutoff_and_can_reverse_smoothly():
+    app = QApplication.instance() or QApplication([])
+    window = LauncherWindow()
+    window.show()
+    app.processEvents()
+    try:
+        window.set_expanded(True, animate=False)
+        anchor = QPoint(window._anchor)
+        window.set_expanded(False)
+        QTest.qWait(240)
+        assert window.COMPACT_WIDTH < window.width() < window.EXPANDED_WIDTH
+        assert 0 < window.unfold < 1
+        before = window.geometry()
+        window.set_expanded(True)
+        assert window.geometry() == before  # reversing cannot jump to an endpoint
+        QTest.qWait(window.MORPH_MS + 60)
+        assert window.width() == window.EXPANDED_WIDTH and window._anchor == anchor
+        window.set_expanded(False)
+        QTest.qWait(window.COLLAPSE_MS + 60)
+        assert window.width() == window.COMPACT_WIDTH and window._anchor == anchor
     finally:
         window.hide()
         window.deleteLater()

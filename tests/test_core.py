@@ -52,6 +52,22 @@ def test_credentials_never_written_to_settings(tmp_path, monkeypatch):
     assert store.get_key(settings.api_url) == ""
 
 
+def test_launcher_preference_round_trips_and_old_configs_default_to_enabled(tmp_path):
+    store = ConfigStore(tmp_path)
+    assert store.load().launcher_enabled
+    path = tmp_path / "settings.json"
+    path.write_text('{"model":"","shortcut":"Ctrl+Shift+K"}')
+    assert store.load().launcher_enabled
+    store.save(Settings(launcher_enabled=False))
+    assert json.loads(path.read_text())["launcher_enabled"] is False
+    assert store.load().launcher_enabled is False
+    for invalid in ("false", 0, None):
+        path.write_text(json.dumps({"launcher_enabled": invalid}))
+        assert store.load().launcher_enabled is True
+        with pytest.raises(ValueError, match="悬浮入口"):
+            Settings(launcher_enabled=invalid).validate()
+
+
 def test_chat_json_and_streaming_only_send_text():
     requests = []
 

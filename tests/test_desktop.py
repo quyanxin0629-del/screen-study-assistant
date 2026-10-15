@@ -381,6 +381,116 @@ def test_answer_close_exposes_settings_and_notes_without_main_page(controller, m
     assert controller.window.isVisible()
 
 
+def test_minimize_exposes_launcher_and_both_restore_paths_preserve_settings(controller, app):
+    window = controller.window
+    window.model.setText("unsaved-test-model")
+    for restore in (controller.show_settings, window.showNormal):
+        window.showMinimized()
+        app.processEvents()
+        assert window.isMinimized() and controller.launcher.isVisible()
+        restore()
+        app.processEvents()
+        assert window.isVisible() and not window.isMinimized()
+        assert not controller.launcher.isVisible()
+        assert window.model.text() == "unsaved-test-model"
+    controller.capture_pending = True
+    window.showMinimized()
+    app.processEvents()
+    assert not controller.launcher.isVisible()
+    controller.capture_pending = False
+    controller.show_settings()
+
+
+def test_launcher_toggle_persists_immediately_without_touching_drafts_or_keychain(controller, monkeypatch, app):
+    for operation in ("get_password", "set_password", "delete_password"):
+        monkeypatch.setattr("keyring." + operation, lambda *_: pytest.fail("Unexpected vault access"))
+    window = controller.window
+    window.url.setText("incomplete draft")
+    window.model.setText("unsaved model")
+    window.key.setText("test-only-unsaved-key")
+    shortcut = controller.hotkey.shortcut
+    QTest.mouseClick(window.launcher_toggle, Qt.LeftButton)
+    assert not window.launcher_toggle.isChecked()
+    assert not controller.settings.launcher_enabled and not controller.store.load().launcher_enabled
+    assert controller.store.load().api_url == ""  # partial API edits were not saved
+    window.showMinimized()
+    app.processEvents()
+    assert not controller.launcher.isVisible()
+    controller.show_settings()
+    window.close()
+    controller.show_launcher()  # tray and answer-close paths use the same preference
+    assert not controller.launcher.isVisible()
+    controller.answer.show()
+    controller.answer.close()
+    assert not controller.launcher.isVisible()
+    controller.show_settings()
+    QTest.mouseClick(window.launcher_toggle, Qt.LeftButton)
+    assert controller.store.load().launcher_enabled
+    window.showMinimized()
+    app.processEvents()
+    assert controller.launcher.isVisible()
+    controller.show_settings()
+    assert window.url.text() == "incomplete draft" and window.model.text() == "unsaved model"
+    assert window.key.text() == "test-only-unsaved-key"
+    assert controller.hotkey.shortcut == shortcut
+
+
+def test_launcher_toggle_rolls_back_when_preference_cannot_be_saved(controller, monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise OSError("test-only disk failure")
+
+    monkeypatch.setattr(controller.store, "save", fail)
+    QTest.mouseClick(controller.window.launcher_toggle, Qt.LeftButton)
+    assert controller.window.launcher_toggle.isChecked() and controller.settings.launcher_enabled
+    assert "保存失败" in controller.window.status.text()
+
+
+def test_reactivating_without_a_launcher_reopens_closed_or_minimized_settings(controller, app):
+    controller.window.launcher_toggle.setChecked(False)
+    controller.window.model.setText("unsaved-test-model")
+    for disappear in (controller.window.close, controller.window.showMinimized):
+        disappear()
+        app.processEvents()
+        assert not controller.launcher.isVisible()
+        controller.application_state_changed(Qt.ApplicationInactive)
+        app.processEvents()
+        assert not controller.window.isVisible() or controller.window.isMinimized()
+        # A repeated active notification must work even if the app was already active.
+        controller.application_state_changed(Qt.ApplicationActive)
+        app.processEvents()
+        assert controller.window.isVisible() and not controller.window.isMinimized()
+        assert controller.window.model.text() == "unsaved-test-model"
+        assert not controller.launcher.isVisible()
+    controller.window.close()
+    action = next(action for action in controller.tray.contextMenu().actions()
+                  if action.text() == "打开主页面")
+    action.trigger()
+    assert controller.window.isVisible()
+    if controller.menu_bar:
+        controller.window.close()
+        controller.settings_action.trigger()
+        assert controller.window.isVisible()
+
+
+def test_background_activation_does_not_interrupt_capture_answers_or_quit(controller, app):
+    controller.window.launcher_toggle.setChecked(False)
+    controller.window.close()
+    for attribute, value in (("capture_pending", True), ("busy", True), ("overlay", object()),
+                             ("quitting", True)):
+        original = getattr(controller, attribute)
+        setattr(controller, attribute, value)
+        controller.application_state_changed(Qt.ApplicationActive)
+        app.processEvents()
+        assert not controller.window.isVisible()
+        setattr(controller, attribute, original)
+    for window in (controller.answer, controller.launcher):
+        window.show()
+        controller.application_state_changed(Qt.ApplicationActive)
+        app.processEvents()
+        assert not controller.window.isVisible()
+        window.hide()
+
+
 def test_float_position_prefers_free_side_and_clamps_negative_monitor_coordinates(app):
     from PySide6.QtCore import QRect, QSize
 
