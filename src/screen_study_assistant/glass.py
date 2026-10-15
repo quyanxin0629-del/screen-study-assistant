@@ -14,6 +14,9 @@ from .config import app_directory
 
 
 class GlassWindow(QWidget):
+    def glass_is_dark(self):
+        return False
+
     def glass_corner_radius(self):
         return 28
 
@@ -116,6 +119,10 @@ class GlassWindow(QWidget):
                 parent = view.superview()
                 framed = not self.windowFlags() & Qt.FramelessWindowHint
                 radius = self.glass_corner_radius()
+                appearance = AppKit.NSAppearance.appearanceNamed_(
+                    AppKit.NSAppearanceNameDarkAqua if self.glass_is_dark()
+                    else AppKit.NSAppearanceNameAqua
+                )
                 # A titled Qt view stops below the traffic lights. Cover the
                 # entire native frame so the titlebar receives the same blur.
                 backdrop_frame = parent.bounds() if framed else view.frame()
@@ -134,9 +141,7 @@ class GlassWindow(QWidget):
                     frost.setMaterial_(AppKit.NSVisualEffectMaterialHUDWindow)
                     frost.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
                     frost.setState_(AppKit.NSVisualEffectStateActive)
-                    frost.setAppearance_(
-                        AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameAqua)
-                    )
+                    frost.setAppearance_(appearance)
                     frost.setAlphaValue_(self.blur_strength)
                     frost.setAutoresizingMask_(18)
                     frost.setWantsLayer_(True)
@@ -155,9 +160,7 @@ class GlassWindow(QWidget):
                         parent.addSubview_positioned_relativeTo_(effect, AppKit.NSWindowBelow, view)
                     else:
                         view.addSubview_positioned_relativeTo_(effect, AppKit.NSWindowBelow, None)
-                effect.setAppearance_(
-                    AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameAqua)
-                )
+                effect.setAppearance_(appearance)
                 if hasattr(effect, "setTintColor_"):
                     effect.setTintColor_(AppKit.NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.06))
                 effect.setAutoresizingMask_(18)  # width + height
