@@ -259,3 +259,37 @@ def test_icon_actions_reveal_their_names_on_hover_and_remain_accessible():
     finally:
         window.hide()
         window.deleteLater()
+
+
+def test_pointer_hover_fallback_opens_and_labels_without_native_enter_events(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = LauncherWindow()
+    window.show()
+    app.processEvents()
+    try:
+        monkeypatch.setattr("screen_study_assistant.launcher.QCursor.pos",
+                            lambda: window.mapToGlobal(window.rect().center()))
+        window._sync_pointer_hover()
+        assert window.expanded and window._drag_origin is None
+        QTest.qWait(window.MORPH_MS + 60)
+        action = window.notes_button
+        monkeypatch.setattr("screen_study_assistant.launcher.QCursor.pos",
+                            lambda: action.mapToGlobal(action.rect().center()))
+        window._sync_pointer_hover()
+        QTest.qWait(200)
+        assert action.hover > .99 and window.capture_button.hover == 0
+        QTest.keyClick(window, Qt.Key_Escape)
+        QTest.qWait(window.MORPH_MS + 60)
+        monkeypatch.setattr("screen_study_assistant.launcher.QCursor.pos",
+                            lambda: window.mapToGlobal(window.rect().center()))
+        window._sync_pointer_hover()
+        assert not window.expanded  # Escape remains effective until the pointer leaves.
+        monkeypatch.setattr("screen_study_assistant.launcher.QCursor.pos", lambda: QPoint(-9999,-9999))
+        window._sync_pointer_hover()
+        monkeypatch.setattr("screen_study_assistant.launcher.QCursor.pos",
+                            lambda: window.mapToGlobal(window.rect().center()))
+        window._sync_pointer_hover()
+        assert window.expanded
+    finally:
+        window.hide()
+        window.deleteLater()
