@@ -67,7 +67,8 @@ def test_boxed_ui_preserves_copy_source_and_blocks_provider_images(app):
     answer.copy_answer()
     assert app.clipboard().text() == source
     for url in ("https://example.invalid/image.png", "file:///etc/passwd"):
-        assert answer.browser.document().resource(QTextDocument.ImageResource, QUrl(url)) is None
+        document = answer.browser.bubbles[-1].body.document()
+        assert document.resource(QTextDocument.ImageResource, QUrl(url)) is None
     answer.deleteLater()
 
 
