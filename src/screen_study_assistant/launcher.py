@@ -102,35 +102,38 @@ class CapsuleAction(QPushButton):
         super().focusOutEvent(event)
 
     def _paint_icon(self, painter, center):
-        painter.save()
-        painter.translate(center - QPointF(12, 12))
-        painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(QColor("#2E425C"), 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        if self.text() == "框选":
-            path = QPainterPath()
-            for a, b, c in (
-                ((8, 3), (3, 3), (3, 8)), ((16, 3), (21, 3), (21, 8)),
-                ((3, 16), (3, 21), (8, 21)), ((16, 21), (21, 21), (21, 16)),
-            ):
-                path.moveTo(*a)
-                path.lineTo(*b)
-                path.lineTo(*c)
-            painter.drawPath(path)
-            painter.drawLine(QPointF(8, 12), QPointF(16, 12))
-            painter.drawLine(QPointF(12, 8), QPointF(12, 16))
-        elif self.text() == "设置":
-            painter.drawEllipse(QPointF(12, 12), 7, 7)
-            painter.drawEllipse(QPointF(12, 12), 2.8, 2.8)
-            painter.translate(12, 12)
-            for _ in range(8):
-                painter.drawLine(QPointF(0, -7), QPointF(0, -10))
-                painter.rotate(45)
-        else:
-            painter.drawRoundedRect(QRectF(4, 3, 16, 18), 2.5, 2.5)
-            painter.drawLine(QPointF(8, 3), QPointF(8, 21))
-            for y in (8, 12, 16):
-                painter.drawLine(QPointF(11, y), QPointF(16, y))
-        painter.restore()
+        # Clear glass adopts its backdrop; a dark keyline and white stroke keep
+        # the symbol readable over both a white page and a dark desktop.
+        for color, width in ((QColor(25, 43, 64, 125), 3.3), (QColor(255, 255, 255, 245), 1.7)):
+            painter.save()
+            painter.translate(center - QPointF(12, 12))
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(color, width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            if self.text() == "框选":
+                path = QPainterPath()
+                for a, b, c in (
+                    ((8, 3), (3, 3), (3, 8)), ((16, 3), (21, 3), (21, 8)),
+                    ((3, 16), (3, 21), (8, 21)), ((16, 21), (21, 21), (21, 16)),
+                ):
+                    path.moveTo(*a)
+                    path.lineTo(*b)
+                    path.lineTo(*c)
+                painter.drawPath(path)
+                painter.drawLine(QPointF(8, 12), QPointF(16, 12))
+                painter.drawLine(QPointF(12, 8), QPointF(12, 16))
+            elif self.text() == "设置":
+                painter.drawEllipse(QPointF(12, 12), 7, 7)
+                painter.drawEllipse(QPointF(12, 12), 2.8, 2.8)
+                painter.translate(12, 12)
+                for _ in range(8):
+                    painter.drawLine(QPointF(0, -7), QPointF(0, -10))
+                    painter.rotate(45)
+            else:
+                painter.drawRoundedRect(QRectF(4, 3, 16, 18), 2.5, 2.5)
+                painter.drawLine(QPointF(8, 3), QPointF(8, 21))
+                for y in (8, 12, 16):
+                    painter.drawLine(QPointF(11, y), QPointF(16, y))
+            painter.restore()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -159,8 +162,13 @@ class CapsuleAction(QPushButton):
             font.setPixelSize(11)
             font.setWeight(font.Weight.Medium)
             painter.setFont(font)
-            painter.setPen(QColor(38, 57, 80, round(255 * amount)))
-            painter.drawText(QRectF(0, 42, self.width(), 17), Qt.AlignCenter, self.text())
+            painter.setOpacity(amount)
+            tip = QRectF(self.width() / 2 - 20, 42, 40, 17)
+            painter.setPen(QPen(QColor(255, 255, 255, 190), .7))
+            painter.setBrush(QColor(248, 251, 255, 225))
+            painter.drawRoundedRect(tip, 8, 8)
+            painter.setPen(QColor(38, 57, 80))
+            painter.drawText(tip, Qt.AlignCenter, self.text())
 
 
 class LauncherWindow(GlassWindow):
