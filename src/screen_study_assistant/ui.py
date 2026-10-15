@@ -6,7 +6,18 @@ import sys
 import uuid
 from math import ceil
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QPoint,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    QUrl,
+    QVariantAnimation,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -233,6 +244,44 @@ class ShortcutEdit(QKeySequenceEdit):
         return super().eventFilter(watched, event)
 
 
+class ToggleSwitch(QPushButton):
+    def __init__(self, checked, parent=None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setFixedSize(48, 28)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setAccessibleName("显示悬浮入口")
+        self.setChecked(checked)
+        self._position = float(checked)
+        self._slide = QVariantAnimation(self)
+        self._slide.setDuration(150)
+        self._slide.valueChanged.connect(self._set_position)
+        self.toggled.connect(self._animate)
+
+    def _set_position(self, value):
+        self._position = float(value)
+        self.update()
+
+    def _animate(self, checked):
+        self._slide.stop()
+        self._slide.setStartValue(self._position)
+        self._slide.setEndValue(float(checked))
+        self._slide.start()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#377BE5") if self.hasFocus() else QColor(118, 141, 170, 90), 1))
+        p = self._position
+        painter.setBrush(QColor(round(177 - 125 * p), round(187 + 12 * p), round(201 - 82 * p)))
+        painter.drawRoundedRect(QRectF(1, 1, 46, 26), 13, 13)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(30, 50, 70, 32))
+        painter.drawEllipse(QRectF(4 + 20 * p, 5, 20, 20))
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.drawEllipse(QRectF(4 + 20 * p, 4, 20, 20))
+
+
 class SettingsWindow(GlassWindow):
     save_requested = Signal()
     test_requested = Signal()
@@ -240,6 +289,8 @@ class SettingsWindow(GlassWindow):
     directory_requested = Signal()
     notes_requested = Signal()
     hidden = Signal()
+    minimized = Signal()
+    restored = Signal()
 
     def __init__(self, settings: Settings, shortcut: str):
         super().__init__(Qt.Window)
@@ -372,6 +423,19 @@ class SettingsWindow(GlassWindow):
         divider.setObjectName("divider")
         divider.setFixedHeight(1)
         shortcut_layout.addWidget(divider)
+        launcher_row = QHBoxLayout()
+        launcher_text = QVBoxLayout()
+        launcher_text.setSpacing(3)
+        launcher_text.addWidget(label("显示悬浮入口"))
+        launcher_text.addWidget(label("关闭或最小化主页面时显示 · 立即生效", "muted", True))
+        launcher_text.addWidget(label(
+            "关闭后可从菜单栏或 Dock 打开主页面。" if sys.platform == "darwin"
+            else "关闭后可从系统托盘打开主页面。", "muted", True
+        ))
+        launcher_row.addLayout(launcher_text, 1)
+        self.launcher_toggle = ToggleSwitch(settings.launcher_enabled)
+        launcher_row.addWidget(self.launcher_toggle)
+        shortcut_layout.addLayout(launcher_row)
         self.ocr_device = QComboBox()
         self.ocr_device.addItem("自动 · 优先 GPU，不可用时使用 CPU", "auto")
         self.ocr_device.addItem("仅使用 CPU", "cpu")
@@ -413,6 +477,15 @@ class SettingsWindow(GlassWindow):
         self.hide()
         self.hidden.emit()
         event.ignore()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange:
+            was_minimized = bool(event.oldState() & Qt.WindowMinimized)
+            if self.isMinimized() and not was_minimized:
+                self.minimized.emit()
+            elif was_minimized and not self.isMinimized():
+                self.restored.emit()
 
 
 class DragHeader(QFrame):

@@ -59,7 +59,7 @@ class CapsuleAction(QPushButton):
         self._keyboard_focus = False
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setFixedSize(80, 62)
+        self.setFixedSize(60, 46)
         self.setStyleSheet("background: transparent; border: none;")
         self.setAccessibleName(text)
         self._hover = QVariantAnimation(self)
@@ -106,7 +106,8 @@ class CapsuleAction(QPushButton):
         # the symbol readable over both a white page and a dark desktop.
         for color, width in ((QColor(25, 43, 64, 125), 3.3), (QColor(255, 255, 255, 245), 1.7)):
             painter.save()
-            painter.translate(center - QPointF(12, 12))
+            painter.translate(center - QPointF(10, 10))
+            painter.scale(5 / 6, 5 / 6)
             painter.setBrush(Qt.NoBrush)
             painter.setPen(QPen(color, width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             if self.text() == "框选":
@@ -155,15 +156,15 @@ class CapsuleAction(QPushButton):
             rim.setColorAt(.45, QColor(255, 255, 255, 0))
             rim.setColorAt(1, QColor(194, 220, 249, round(58 if self.primary else amount * 35)))
             painter.setPen(QPen(rim, .8))
-            painter.drawRoundedRect(rect, 29, 29)
-        self._paint_icon(painter, QPointF(rect.center().x(), rect.center().y() - amount * 7))
+            painter.drawRoundedRect(rect, 21, 21)
+        self._paint_icon(painter, QPointF(rect.center().x(), rect.center().y() - amount * 5))
         if amount > 0:
             font = self.font()
-            font.setPixelSize(11)
+            font.setPixelSize(10)
             font.setWeight(font.Weight.Medium)
             painter.setFont(font)
             painter.setOpacity(amount)
-            tip = QRectF(self.width() / 2 - 20, 42, 40, 17)
+            tip = QRectF(self.width() / 2 - 18, 30, 36, 15)
             painter.setPen(QPen(QColor(255, 255, 255, 190), .7))
             painter.setBrush(QColor(248, 251, 255, 225))
             painter.drawRoundedRect(tip, 8, 8)
@@ -176,11 +177,14 @@ class LauncherWindow(GlassWindow):
     settings_requested = Signal()
     notes_requested = Signal()
 
-    COMPACT_WIDTH = 46
-    COMPACT_HEIGHT = 70
-    EXPANDED_WIDTH = 296
-    HEIGHT = 82
-    MORPH_MS = 520
+    COMPACT_WIDTH = 40
+    COMPACT_HEIGHT = 40
+    COMPACT_RADIUS = 20
+    EXPANDED_WIDTH = 224
+    HEIGHT = 62
+    MORPH_MS = 360
+    COLLAPSE_MS = 560
+    LEAVE_DELAY_MS = 180
 
     def __init__(self):
         # A real frameless window keeps native mouse activation/dragging on the
@@ -213,7 +217,7 @@ class LauncherWindow(GlassWindow):
         self._actions = QWidget(self)
         layout = QHBoxLayout(self._actions)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(6)
         self.capture_button = CapsuleAction("框选", True, self._actions)
         self.settings_button = CapsuleAction("设置", False, self._actions)
         self.notes_button = CapsuleAction("笔记", False, self._actions)
@@ -225,7 +229,7 @@ class LauncherWindow(GlassWindow):
             item.clicked.connect(signal)
             item.installEventFilter(self)
             layout.addWidget(item)
-        self._actions.setFixedSize(256, 62)
+        self._actions.setFixedSize(192, 46)
         self._opacity = QGraphicsOpacityEffect(self._actions)
         self._actions.setGraphicsEffect(self._opacity)
         self._actions.hide()
@@ -240,9 +244,10 @@ class LauncherWindow(GlassWindow):
         self._pulse_animation.setDuration(650)
         self._collapse_timer = QTimer(self)
         self._collapse_timer.setSingleShot(True)
-        self._collapse_timer.setInterval(2600)
+        self._collapse_timer.setInterval(self.LEAVE_DELAY_MS)
         self._collapse_timer.timeout.connect(self._collapse_if_idle)
         self._glow_timer = QTimer(self)
+        self._glow_timer.setTimerType(Qt.PreciseTimer)
         self._glow_timer.setInterval(33)
         self._glow_timer.timeout.connect(self._tick)
         self.setAccessibleDescription("鼠标移入展开，悬停图标显示功能名称；拖动任意位置移动，Esc 收起")
@@ -333,6 +338,9 @@ class LauncherWindow(GlassWindow):
         self._animation.stop()
         self._actions.setEnabled(False)
         if animate:
+            self._animation.setDuration(self.MORPH_MS if expanded else self.COLLAPSE_MS)
+            self._animation.setEasingCurve(QEasingCurve.OutCubic if expanded else QEasingCurve.InOutCubic)
+            self._glow_timer.setInterval(16)
             self._animation.setStartValue(self._unfold)
             self._animation.setEndValue(target)
             self._animation.start()
@@ -342,21 +350,34 @@ class LauncherWindow(GlassWindow):
         self.setAccessibleName("快捷入口" if expanded else "快捷入口 · 鼠标移入展开框选、设置和笔记")
 
     def _finish_transition(self):
+        self._glow_timer.setInterval(33)
         self._actions.setEnabled(self.expanded)
         self._actions.setVisible(self.expanded)
         if self.expanded and self._keyboard_open:
             self.capture_button.setFocus(Qt.TabFocusReason)
-        if self.expanded and not self._keyboard_open:
-            self._collapse_timer.start()
+        if self.expanded and not self._pointer_inside():
+            self._schedule_collapse()
         self.update()
+
+    def _schedule_collapse(self):
+        if (self.expanded and not self._keyboard_open and self._drag_origin is None
+                and not self._collapse_timer.isActive()):
+            self._collapse_timer.start()
+
+    def _pointer_inside(self):
+        point = self.mapFromGlobal(QCursor.pos())
+        radius = self.glass_corner_radius()
+        cx = max(radius, min(point.x(), self.width() - radius))
+        cy = max(radius, min(point.y(), self.height() - radius))
+        return (self.rect().contains(point)
+                and (point.x() - cx) ** 2 + (point.y() - cy) ** 2 <= radius ** 2)
 
     def _collapse_if_idle(self):
         # Native glass can leave QWidget.underMouse() stale after a resize.
         # Use the actual desktop pointer to avoid a permanently expanded particle.
         if self._drag_origin is not None or self._keyboard_open:
             return
-        if self.geometry().contains(QCursor.pos()):
-            self._collapse_timer.start()
+        if self._pointer_inside():
             return
         self.set_expanded(False)
 
@@ -368,20 +389,15 @@ class LauncherWindow(GlassWindow):
     def _sync_pointer_hover(self):
         if not self.isVisible():
             return
-        point = self.mapFromGlobal(QCursor.pos())
-        radius = self.glass_corner_radius()
-        cx = max(radius, min(point.x(), self.width() - radius))
-        cy = max(radius, min(point.y(), self.height() - radius))
-        inside = (self.rect().contains(point)
-                  and (point.x() - cx) ** 2 + (point.y() - cy) ** 2 <= radius ** 2)
+        inside = self._pointer_inside()
         if inside:
             self._collapse_timer.stop()
+            self._keyboard_open = False
             if not self._hover_suppressed and self._drag_origin is None:
                 self.set_expanded(True)
         else:
             self._hover_suppressed = False
-            if self._hover_inside and self.expanded and not self._keyboard_open:
-                self._collapse_timer.start()
+            self._schedule_collapse()
         self._hover_inside = inside
         for action in (self.capture_button, self.settings_button, self.notes_button):
             hovered = (inside and action.isVisible() and action.isEnabled()
@@ -390,14 +406,14 @@ class LauncherWindow(GlassWindow):
 
     def enterEvent(self, event):
         self._collapse_timer.stop()
+        self._keyboard_open = False
         if self._drag_origin is None and not self._hover_suppressed:
             self.set_expanded(True)
         self.update()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        if self.expanded and not self._keyboard_open:
-            self._collapse_timer.start()
+        self._schedule_collapse()
         super().leaveEvent(event)
 
     def showEvent(self, event):
@@ -407,6 +423,7 @@ class LauncherWindow(GlassWindow):
     def hideEvent(self, event):
         self._collapse_timer.stop()
         self._glow_timer.stop()
+        self._glow_timer.setInterval(33)
         self._animation.stop()
         self._press_animation.stop()
         self._pulse_animation.stop()
@@ -512,9 +529,9 @@ class LauncherWindow(GlassWindow):
         painter.setClipPath(path)
         tint = QLinearGradient(rect.topLeft(), rect.bottomRight())
         alpha = 1 if self.native_glass else 4.5
-        tint.setColorAt(0, QColor(255, 255, 255, round(42 * alpha)))
-        tint.setColorAt(.45, QColor(244, 249, 255, round(25 * alpha)))
-        tint.setColorAt(1, QColor(218, 233, 251, round(35 * alpha)))
+        tint.setColorAt(0, QColor(255, 255, 255, round(26 * alpha)))
+        tint.setColorAt(.45, QColor(244, 249, 255, round(12 * alpha)))
+        tint.setColorAt(1, QColor(218, 233, 251, round(20 * alpha)))
         painter.fillPath(path, tint)
         phase = (monotonic() - self._glow_started) * 1.25
         center = QPointF(self.width() / 2, self.height() / 2)
@@ -525,22 +542,22 @@ class LauncherWindow(GlassWindow):
             spot = center + QPointF(dx * spread + sin(phase + dy * 3) * 2,
                                     dy * spread + sin(phase * .8 + dx * 4) * 2)
             radial(painter, path, spot, 18 + self._unfold * 12, color,
-                   70 + 12 * sin(phase + dx))
+                   50 + 10 * sin(phase + dx))
         touch = QPointF(self.width() * self._pointer.x(), self.height() * self._pointer.y())
         radial(painter, path, touch, 42, '#DBF8FF', 10 + self._press * 32)
         # Curved specular streaks and paired bright/dark rims give thickness to the glass.
         sheen = QLinearGradient(0, rect.top(), 0, rect.bottom())
-        sheen.setColorAt(0, QColor(255, 255, 255, 37))
+        sheen.setColorAt(0, QColor(255, 255, 255, 24))
         sheen.setColorAt(.22, QColor(255, 255, 255, 2))
         sheen.setColorAt(.72, QColor(255, 255, 255, 0))
-        sheen.setColorAt(1, QColor(190, 224, 250, 18))
+        sheen.setColorAt(1, QColor(190, 224, 250, 12))
         painter.fillPath(path, sheen)
         inner = rect.adjusted(2, 2, -2, -2)
         painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(QColor(4, 16, 30, 65), 1.5))
+        painter.setPen(QPen(QColor(4, 16, 30, 35), .9))
         painter.drawRoundedRect(inner, max(0, radius - 2), max(0, radius - 2))
         rim = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        rim.setColorAt(0, QColor(255, 255, 255, 220))
+        rim.setColorAt(0, QColor(255, 255, 255, 180))
         rim.setColorAt(.25, QColor(226, 247, 255, 65))
         rim.setColorAt(.52, QColor(255, 255, 255, 13))
         rim.setColorAt(1, QColor(215, 225, 255, 155))

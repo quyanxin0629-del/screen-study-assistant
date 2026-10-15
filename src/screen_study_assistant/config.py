@@ -62,6 +62,7 @@ class Settings:
     shortcut: str = "Meta+Shift+K" if sys.platform == "darwin" else "Ctrl+Shift+K"
 
     ocr_device: str = "auto"
+    launcher_enabled: bool = True
 
     def validate(self) -> "Settings":
         url = normalize_url(self.api_url) if self.api_url.strip() else ""
@@ -69,12 +70,15 @@ class Settings:
             raise ValueError("API URL 与模型名称需要一起填写；也可以先留空，只保存快捷键。")
         if self.ocr_device not in ("auto", "cpu"):
             raise ValueError("OCR 模式需要选择自动或 CPU。")
+        if not isinstance(self.launcher_enabled, bool):
+            raise ValueError("悬浮入口开关需要为开启或关闭。")
         return Settings(
             url,
             self.model.strip(),
             self.notes_dir,
             normalize_shortcut(self.shortcut),
             self.ocr_device,
+            self.launcher_enabled,
         )
 
 
@@ -93,7 +97,8 @@ class ConfigStore:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             return Settings(
-                **{k: v for k, v in data.items() if k in asdict(Settings()) and isinstance(v, str)}
+                **{k: v for k, v in data.items() if k in asdict(Settings())
+                   and isinstance(v, bool if k == "launcher_enabled" else str)}
             )
         except (ValueError, TypeError) as exc:
             raise ValueError("本地设置文件损坏，请重新保存设置。") from exc

@@ -6,6 +6,7 @@ import argparse
 import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime
 from threading import Event
 
@@ -136,6 +137,12 @@ class Controller(QObject):
             # Override Qt's default Quit, which asks hide-on-close windows to close.
             self.menu_bar = QMenuBar()
             app_menu = self.menu_bar.addMenu("应用")
+            self.settings_action = QAction("打开主页面", self)
+            self.settings_action.setMenuRole(QAction.PreferencesRole)
+            self.settings_action.setShortcut(QKeySequence("Meta+,"))
+            self.settings_action.setShortcutContext(Qt.ApplicationShortcut)
+            self.settings_action.triggered.connect(self.show_settings)
+            app_menu.addAction(self.settings_action)
             self.quit_action = QAction("退出", self)
             self.quit_action.setMenuRole(QAction.QuitRole)
             self.quit_action.setShortcut(QKeySequence("Meta+Q"))
@@ -157,6 +164,9 @@ class Controller(QObject):
         self.answer.notes_requested.connect(self.open_notes)
         self.answer.closed.connect(self.show_launcher)
         self.window.hidden.connect(self.show_launcher)
+        self.window.minimized.connect(self.show_launcher)
+        self.window.restored.connect(self.launcher.hide)
+        self.window.launcher_toggle.toggled.connect(self.set_launcher_enabled)
         self.launcher.capture_requested.connect(self.capture)
         self.launcher.settings_requested.connect(self.show_settings)
         self.launcher.notes_requested.connect(self.open_notes)
@@ -165,7 +175,7 @@ class Controller(QObject):
         self.tray.setToolTip("屏幕学习助手 · " + self.hotkey.label)
         menu = QMenu()
         self.capture_action = menu.addAction("框选并解释  " + self.hotkey.label, self.capture)
-        menu.addAction("模型设置", self.show_settings)
+        menu.addAction("打开主页面", self.show_settings)
         menu.addAction("打开本地笔记", self.open_notes)
         menu.addAction("显示快捷工具条", self.show_launcher)
         menu.addSeparator()
@@ -180,6 +190,10 @@ class Controller(QObject):
         )
         if not preview:
             self.tray.show()
+            if sys.platform == "darwin":
+                # Cocoa forwards every Dock/Finder reopen as ApplicationActive,
+                # even when already active. A hidden Qt window needs restoring.
+                app.applicationStateChanged.connect(self.application_state_changed)
             try:
                 self.hotkey.start(self.settings.shortcut)
                 self.window.hotkey_status.setText("快捷键已就绪 · 关闭此窗口后仍在菜单栏运行")
@@ -228,15 +242,51 @@ class Controller(QObject):
         return task
 
     def show_settings(self):
-        self.window.show()
+        if self.quitting:
+            return
+        if self.window.isMinimized():
+            self.window.showNormal()
+        else:
+            self.window.show()
         self.window.raise_()
         self.window.activateWindow()
         self.launcher.hide()
 
+    def application_state_changed(self, state):
+        if state == Qt.ApplicationActive:
+            # Let capture/window transitions settle before deciding whether the
+            # activation came back to an app with no usable window.
+            QTimer.singleShot(0, self.reopen_if_hidden)
+
+    def reopen_if_hidden(self):
+        if (self.quitting or self.capture_pending or self.busy or self.overlay is not None
+                or self.answer.isVisible() or self.launcher.isVisible()):
+            return
+        if not self.window.isVisible() or self.window.isMinimized():
+            self.show_settings()
+
     def show_launcher(self):
-        if not self.quitting and not self.capture_pending:
+        if self.settings.launcher_enabled and not self.quitting and not self.capture_pending:
             self.launcher.show()
             self.launcher.raise_()
+
+    def set_launcher_enabled(self, enabled):
+        try:
+            settings = replace(self.settings, launcher_enabled=enabled)
+            # Save only this preference, without reading the vault or consuming
+            # unsaved API fields in the form.
+            self.store.save(settings)
+            self.settings = settings
+        except Exception:
+            self.window.launcher_toggle.blockSignals(True)
+            self.window.launcher_toggle.setChecked(self.settings.launcher_enabled)
+            self.window.launcher_toggle.blockSignals(False)
+            self.window.show_status("悬浮入口设置保存失败，请检查配置目录权限。", True)
+            return
+        if not enabled:
+            self.launcher.hide()
+        elif not self.window.isVisible() or self.window.isMinimized():
+            self.show_launcher()
 
     def open_notes(self):
         from PySide6.QtCore import QUrl
@@ -266,6 +316,7 @@ class Controller(QObject):
             self.window.notes_dir,
             self.window.shortcut.keySequence().toString(QKeySequence.PortableText),
             self.window.ocr_device.currentData(),
+            self.window.launcher_toggle.isChecked(),
         ).validate()
         if require_model and not settings.model:
             raise ValueError("请填写 API URL 和模型名称（模型 ID）。")
@@ -459,6 +510,7 @@ class Controller(QObject):
             self.settings.notes_dir,
             self.settings.shortcut,
             self.settings.ocr_device,
+            self.settings.launcher_enabled,
         )
         self.session_key = key
         self.answer.hide()
