@@ -55,6 +55,7 @@ class CapsuleAction(QPushButton):
         super().__init__(text, parent)
         self.primary = primary
         self.hover = 0.0
+        self._pointer_hover = False
         self._keyboard_focus = False
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -76,12 +77,17 @@ class CapsuleAction(QPushButton):
         self._hover.start()
 
     def enterEvent(self, event):
-        self._animate_hover(1.0)
+        self.set_pointer_hover(True)
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        self._animate_hover(0.0)
+        self.set_pointer_hover(False)
         super().leaveEvent(event)
+
+    def set_pointer_hover(self, hovered):
+        if hovered != self._pointer_hover:
+            self._pointer_hover = hovered
+            self._animate_hover(1.0 if hovered else 0.0)
 
     def focusInEvent(self, event):
         self._keyboard_focus = event.reason() in (
@@ -188,6 +194,8 @@ class LauncherWindow(GlassWindow):
         self._drag_anchor = None
         self._dragged = False
         self._keyboard_open = False
+        self._hover_inside = False
+        self._hover_suppressed = False
         self._anchor_right = True
         self._glow_started = monotonic()
         self.resize(self.COMPACT_WIDTH, self.COMPACT_HEIGHT)
@@ -228,7 +236,7 @@ class LauncherWindow(GlassWindow):
         self._collapse_timer.timeout.connect(self._collapse_if_idle)
         self._glow_timer = QTimer(self)
         self._glow_timer.setInterval(33)
-        self._glow_timer.timeout.connect(self.update)
+        self._glow_timer.timeout.connect(self._tick)
         self.setAccessibleDescription("鼠标移入展开，悬停图标显示功能名称；拖动任意位置移动，Esc 收起")
 
     def glass_is_dark(self):
@@ -344,9 +352,37 @@ class LauncherWindow(GlassWindow):
             return
         self.set_expanded(False)
 
+    def _tick(self):
+        if QGuiApplication.platformName() != "offscreen":
+            self._sync_pointer_hover()
+        self.update()
+
+    def _sync_pointer_hover(self):
+        if not self.isVisible():
+            return
+        point = self.mapFromGlobal(QCursor.pos())
+        radius = self.glass_corner_radius()
+        cx = max(radius, min(point.x(), self.width() - radius))
+        cy = max(radius, min(point.y(), self.height() - radius))
+        inside = (self.rect().contains(point)
+                  and (point.x() - cx) ** 2 + (point.y() - cy) ** 2 <= radius ** 2)
+        if inside:
+            self._collapse_timer.stop()
+            if not self._hover_suppressed and self._drag_origin is None:
+                self.set_expanded(True)
+        else:
+            self._hover_suppressed = False
+            if self._hover_inside and self.expanded and not self._keyboard_open:
+                self._collapse_timer.start()
+        self._hover_inside = inside
+        for action in (self.capture_button, self.settings_button, self.notes_button):
+            hovered = (inside and action.isVisible() and action.isEnabled()
+                       and action.rect().contains(action.mapFromGlobal(QCursor.pos())))
+            action.set_pointer_hover(hovered)
+
     def enterEvent(self, event):
         self._collapse_timer.stop()
-        if self._drag_origin is None:
+        if self._drag_origin is None and not self._hover_suppressed:
             self.set_expanded(True)
         self.update()
         super().enterEvent(event)
@@ -368,6 +404,8 @@ class LauncherWindow(GlassWindow):
         self._pulse_animation.stop()
         self._drag_origin = None
         self._keyboard_open = False
+        self._hover_inside = False
+        self._hover_suppressed = False
         self._press = 0.0
         self._pulse = 1.0
         self.set_expanded(False, animate=False)
@@ -447,6 +485,7 @@ class LauncherWindow(GlassWindow):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
             self._keyboard_open = False
+            self._hover_suppressed = True
             self.set_expanded(False)
         elif event.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter) and not self.expanded:
             self._keyboard_open = True
