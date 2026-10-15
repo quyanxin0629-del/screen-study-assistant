@@ -14,6 +14,29 @@ from .config import app_directory
 
 
 class GlassWindow(QWidget):
+    def glass_corner_radius(self):
+        return 28
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._effect is None:
+            return
+        radius = self.glass_corner_radius()
+        for effect in (self._effect, self._frost):
+            if effect is not None:
+                if hasattr(effect, "setCornerRadius_"):
+                    effect.setCornerRadius_(radius)
+                effect.layer().setCornerRadius_(radius)
+        if self._effect is not None and not self.windowFlags() & Qt.FramelessWindowHint:
+            return
+        if self._effect is not None:
+            import ctypes
+
+            import objc
+
+            view = objc.objc_object(c_void_p=ctypes.c_void_p(int(self.winId())))
+            view.layer().setCornerRadius_(radius)
+
     def __init__(self, flags=None):
         if flags is None:
             flags = Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
@@ -92,13 +115,14 @@ class GlassWindow(QWidget):
                 window = view.window()
                 parent = view.superview()
                 framed = not self.windowFlags() & Qt.FramelessWindowHint
+                radius = self.glass_corner_radius()
                 # A titled Qt view stops below the traffic lights. Cover the
                 # entire native frame so the titlebar receives the same blur.
                 backdrop_frame = parent.bounds() if framed else view.frame()
                 if hasattr(AppKit, "NSGlassEffectView"):
                     effect = AppKit.NSGlassEffectView.alloc().initWithFrame_(backdrop_frame)
                     effect.setStyle_(AppKit.NSGlassEffectViewStyleClear)
-                    effect.setCornerRadius_(28)
+                    effect.setCornerRadius_(radius)
                     # Preserve Qt's content view and accessibility hierarchy.
                     effect.setContentView_(AppKit.NSView.alloc().initWithFrame_(effect.bounds()))
                     parent.addSubview_positioned_relativeTo_(
@@ -116,7 +140,7 @@ class GlassWindow(QWidget):
                     frost.setAlphaValue_(self.blur_strength)
                     frost.setAutoresizingMask_(18)
                     frost.setWantsLayer_(True)
-                    frost.layer().setCornerRadius_(28)
+                    frost.layer().setCornerRadius_(radius)
                     frost.layer().setMasksToBounds_(True)
                     parent.addSubview_positioned_relativeTo_(
                         frost, AppKit.NSWindowBelow, effect
@@ -138,10 +162,10 @@ class GlassWindow(QWidget):
                     effect.setTintColor_(AppKit.NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.06))
                 effect.setAutoresizingMask_(18)  # width + height
                 effect.setWantsLayer_(True)
-                effect.layer().setCornerRadius_(28)
+                effect.layer().setCornerRadius_(radius)
                 effect.layer().setMasksToBounds_(True)
                 view.setWantsLayer_(True)
-                view.layer().setCornerRadius_(0 if framed else 28)
+                view.layer().setCornerRadius_(0 if framed else radius)
                 view.layer().setMasksToBounds_(True)
                 window.setOpaque_(False)
                 window.setBackgroundColor_(AppKit.NSColor.clearColor())
@@ -198,7 +222,8 @@ class GlassWindow(QWidget):
             # of rounded corners or horizontal rim underneath the titlebar.
             rect.setTop(-self._native_titlebar_height)
         path = QPainterPath()
-        path.addRoundedRect(rect, 28, 28)
+        radius = self.glass_corner_radius()
+        path.addRoundedRect(rect, radius, radius)
         gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
         alpha = round(48 + 80 * self.blur_strength) if self.native_glass else 165
         gradient.setColorAt(0, QColor(255, 255, 255, alpha))

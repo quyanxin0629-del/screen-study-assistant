@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 
 from .config import Settings
 from .glass import GlassWindow
+from .launcher import LauncherWindow as LauncherWindow
 from .math_rendering import MathRenderer
 from .math_text import Formula, split_formulas
 from .notes import format_question
@@ -1046,41 +1047,6 @@ def adjacent_position(selection, size, area, gap=14):
         return max(0, rect.width()) * max(0, rect.height())
 
     return min(clamped, key=overlap)
-
-
-class LauncherWindow(GlassWindow):
-    capture_requested = Signal()
-    settings_requested = Signal()
-    notes_requested = Signal()
-
-    def __init__(self):
-        super().__init__()
-        self.setObjectName("launcher")
-        self.setWindowTitle("屏幕学习助手 · 快捷入口")
-        self.setStyleSheet(STYLE)
-        self.setFixedSize(260, 60)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
-        handle = DragHeader(self)
-        handle.setFixedWidth(24)
-        grip = QHBoxLayout(handle)
-        grip.setContentsMargins(0, 0, 0, 0)
-        grip.addWidget(label("⠿", "muted"))
-        layout.addWidget(handle)
-        self.capture_button = button("框选", "primary")
-        self.settings_button = button("设置")
-        self.notes_button = button("笔记")
-        for item, signal in (
-            (self.capture_button, self.capture_requested),
-            (self.settings_button, self.settings_requested),
-            (self.notes_button, self.notes_requested),
-        ):
-            item.setStyleSheet("padding: 9px 12px; border-radius: 17px;")
-            item.clicked.connect(signal)
-            layout.addWidget(item)
-        self.setToolTip("拖动左侧手柄可移动 · 关闭回答后仍可打开设置和笔记")
-        area = QGuiApplication.primaryScreen().availableGeometry()
-        self.move(area.right() - self.width() - 24, area.bottom() - self.height() - 24)
 
 
 class CaptureOverlay(QWidget):
