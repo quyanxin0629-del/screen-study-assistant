@@ -14,6 +14,9 @@ from .config import app_directory
 
 
 class GlassWindow(QWidget):
+    def glass_frost_strength(self):
+        return self.blur_strength
+
     def glass_is_dark(self):
         return False
 
@@ -86,7 +89,7 @@ class GlassWindow(QWidget):
                 return
         self.blur_strength = float(strength)
         if self._frost is not None:
-            self._frost.setAlphaValue_(self.blur_strength)
+            self._frost.setAlphaValue_(self.glass_frost_strength())
         self._update_titlebar_tint()
         self.update()
 
@@ -137,20 +140,21 @@ class GlassWindow(QWidget):
                     )
                     # A lightly blended native blur softens the clear glass
                     # without replacing it with the opaque regular material.
-                    frost = AppKit.NSVisualEffectView.alloc().initWithFrame_(backdrop_frame)
-                    frost.setMaterial_(AppKit.NSVisualEffectMaterialHUDWindow)
-                    frost.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
-                    frost.setState_(AppKit.NSVisualEffectStateActive)
-                    frost.setAppearance_(appearance)
-                    frost.setAlphaValue_(self.blur_strength)
-                    frost.setAutoresizingMask_(18)
-                    frost.setWantsLayer_(True)
-                    frost.layer().setCornerRadius_(radius)
-                    frost.layer().setMasksToBounds_(True)
-                    parent.addSubview_positioned_relativeTo_(
-                        frost, AppKit.NSWindowBelow, effect
-                    )
-                    self._frost = frost
+                    if self.glass_frost_strength() > 0:
+                        frost = AppKit.NSVisualEffectView.alloc().initWithFrame_(backdrop_frame)
+                        frost.setMaterial_(AppKit.NSVisualEffectMaterialHUDWindow)
+                        frost.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
+                        frost.setState_(AppKit.NSVisualEffectStateActive)
+                        frost.setAppearance_(appearance)
+                        frost.setAlphaValue_(self.glass_frost_strength())
+                        frost.setAutoresizingMask_(18)
+                        frost.setWantsLayer_(True)
+                        frost.layer().setCornerRadius_(radius)
+                        frost.layer().setMasksToBounds_(True)
+                        parent.addSubview_positioned_relativeTo_(
+                            frost, AppKit.NSWindowBelow, effect
+                        )
+                        self._frost = frost
                 else:
                     effect = AppKit.NSVisualEffectView.alloc().initWithFrame_(backdrop_frame)
                     effect.setMaterial_(AppKit.NSVisualEffectMaterialHUDWindow)
